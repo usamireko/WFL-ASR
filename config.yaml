@@ -1,0 +1,31 @@
+data:
+  data_dir: "/content/data" # folder that has *.wav and *.lab data
+  sample_rate: 16000 # not doing 44.1kHz cus both the encoders were trained on 16kHz- also its lighter to do ASR with lower sampling rate
+  num_val_files: 10
+  max_seq_len: null # no limits of phonemes amount in a segment (full segment)
+  #frame_duration: 0.02 (this shouldnt be changed)
+
+model:
+  encoder_type: "whisper"  # or "wavlm"
+  whisper_model: "openai/whisper-base" # look at model_list.txt for more model types
+  wavlm_model: "microsoft/wavlm-base" # same here, but the more advanced the base, the bigger and slower it trains
+  freeze_encoder: false # false to finetune the encoder, true to not finetune
+  bilstm_num_layer: 3
+  num_conformer_layers: 2
+  conformer_heads: 4
+  conformer_ff_expansion: 4
+  conformer_kernel_size: 31
+  conformer_dropout: 0.1
+
+training:
+  batch_size: 1 # 1 for full individual sample per batch, cant set this to anything else (cus not implemented)
+  num_workers: 4
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  max_steps: 50000
+  val_check_interval: 500
+  max_checkpoints: 5
+  log_dir: "/content/logs" # path to logs folder for tensorboard
+
+output:
+  save_dir: "/content/checkpoints" # path to save folder
