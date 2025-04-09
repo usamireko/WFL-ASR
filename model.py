@@ -56,6 +56,7 @@ class BIOPhonemeTagger(nn.Module):
         
         self.encoder_type = encoder_type
         self.freeze_encoder = config["model"].get("freeze_encoder", False)
+        self.enable_bilstm = config["model"].get("enable_bilstm", True)
 
         if encoder_type == "whisper":
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
@@ -72,13 +73,16 @@ class BIOPhonemeTagger(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-        self.bilstm = nn.LSTM(
-            input_size=hidden_size,
-            hidden_size=hidden_size // 2,
-            num_layers=config["model"].get("bilstm_num_layer", 1),
-            batch_first=True,
-            bidirectional=True
-        )
+        if self.enable_bilstm:
+            self.bilstm = nn.LSTM(
+                input_size=hidden_size,
+                hidden_size=hidden_size // 2,
+                num_layers=config["model"].get("bilstm_num_layer", 1),
+                batch_first=True,
+                bidirectional=True
+            )
+        else:
+            self.bilstm = None
 
         self.conformer_layers = nn.ModuleList([
             ConformerBlock(
@@ -112,12 +116,12 @@ class BIOPhonemeTagger(nn.Module):
         else:
             hidden_states = self.encoder(input_values).last_hidden_state
 
-        lstm_out, _ = self.bilstm(hidden_states)
-
+        if self.enable_bilstm and self.bilstm is not None:
+            hidden_states, _ = self.bilstm(hidden_states)
+        out = hidden_states
         for layer in self.conformer_layers:
-            lstm_out = layer(lstm_out)
-
-        logits = self.classifier(lstm_out)
+            out = layer(out)
+        logits = self.classifier(out)
         return logits
 
     def decode_predictions(self, logits):
