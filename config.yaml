@@ -10,6 +10,7 @@ model:
   whisper_model: "openai/whisper-base" # look at model_list.txt for more model types
   wavlm_model: "microsoft/wavlm-base" # same here, but the more advanced the base, the bigger and slower it trains
   freeze_encoder: false # false to finetune the encoder, true to not finetune
+  enable_bilstm: true
   bilstm_num_layer: 3
   num_conformer_layers: 2
   conformer_heads: 4
