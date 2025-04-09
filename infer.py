@@ -31,8 +31,8 @@ def infer_audio(
     return: A list of predicted segments, where each segment is (start_time, end_time, phoneme)
     """
     config = load_config(config_path)
-
-    label_list = load_phoneme_list(config["data"]["phoneme_set"])
+    
+    label_list = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
 
     model = BIOPhonemeTagger(config, label_list)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
