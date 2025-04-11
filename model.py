@@ -58,6 +58,13 @@ class BIOPhonemeTagger(nn.Module):
         self.freeze_encoder = config["model"].get("freeze_encoder", False)
         self.enable_bilstm = config["model"].get("enable_bilstm", True)
 
+        self.enable_dilated_conv = config["model"].get("enable_dilated_conv", True)
+        self.dilated_conv_depth = config["model"].get("dilated_conv_depth", 2)
+        self.dilated_conv_kernel = config["model"].get("dilated_conv_kernel", 3)
+
+        self.enable_self_attn_polisher = config["model"].get("enable_self_attn_polisher", True)
+        self.self_attn_heads = config["model"].get("self_attn_heads", 2)
+
         if encoder_type == "whisper":
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
             self.encoder = WhisperModel.from_pretrained(model_name).encoder
@@ -95,6 +102,18 @@ class BIOPhonemeTagger(nn.Module):
             for _ in range(config["model"].get("num_conformer_layers", 2))
         ])
 
+        if self.enable_dilated_conv:
+            convs = []
+            for i in range(self.dilated_conv_depth):
+                dilation = 2 ** i
+                padding = dilation * (self.dilated_conv_kernel - 1) // 2
+                convs.append(nn.Conv1d(hidden_size, hidden_size, kernel_size=self.dilated_conv_kernel, dilation=dilation, padding=padding))
+                convs.append(nn.ReLU())
+            self.dilated_conv_stack = nn.Sequential(*convs)
+
+        if self.enable_self_attn_polisher:
+            self.self_attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=self.self_attn_heads, batch_first=True)
+
         self.classifier = nn.Linear(hidden_size, len(label_list))
         self.label_list = label_list
         self.label2id = {label: i for i, label in enumerate(label_list)}
@@ -121,6 +140,13 @@ class BIOPhonemeTagger(nn.Module):
         out = hidden_states
         for layer in self.conformer_layers:
             out = layer(out)
+
+        if self.enable_dilated_conv:
+            out = self.dilated_conv_stack(out.transpose(1, 2)).transpose(1, 2)  # [B, D, T] → [B, T, D]
+
+        if self.enable_self_attn_polisher:
+            out, _ = self.self_attn(out, out, out)
+
         logits = self.classifier(out)
         return logits
 
