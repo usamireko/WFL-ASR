@@ -11,7 +11,8 @@ from tqdm import tqdm
 import soundfile as sf
 import torchaudio
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction
+from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments
+from scipy.ndimage import median_filter
 
 frame_duration = 0.02 # ~20ms per frame
 
