@@ -5,15 +5,40 @@ import yaml
 import soundfile as sf
 import torchaudio
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list
-
-# ill make batch infer later but for now just one file each time
+from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments
+from scipy.ndimage import median_filter
 
 frame_duration = 0.02  # ~20ms per frame
 
 def load_config(config_path="config.yaml"):
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
+
+def infer_folder(
+    folder_path: str,
+    config_path: str = "config.yaml",
+    checkpoint_path: str = "best_model.pt",
+    output_dir: str = "outputs",
+    device: str = "cuda"
+):
+    wav_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".wav")]
+    os.makedirs(output_dir, exist_ok=True)
+
+    for wav_file in wav_files:
+        full_audio_path = os.path.join(folder_path, wav_file)
+        output_lab_path = os.path.join(output_dir, wav_file.replace(".wav", ".lab"))
+
+        print(f"Inferencing: {wav_file}")
+        segments = infer_audio(
+            audio_path=full_audio_path,
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            output_lab_path=output_lab_path,
+            device=device
+        )
+
+        for seg in segments:
+            print(seg)
 
 def infer_audio(
     audio_path: str,
@@ -33,9 +58,11 @@ def infer_audio(
     config = load_config(config_path)
     
     label_list = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
+    median_filter_size = config["postprocess"]["median_filter"]
+    merge_segments = config["postprocess"]["merge_segments"]
 
     model = BIOPhonemeTagger(config, label_list)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
 
@@ -57,14 +84,19 @@ def infer_audio(
         # logits shape: [1, frames, num_classes]
         logits = model(input_values)
 
-        preds = torch.argmax(logits, dim=-1).squeeze(0).cpu().tolist()
+    pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
+    smoothed_ids = median_filter(pred_ids, size=median_filter_size)
 
-    pred_tags = [label_list[i] for i in preds]
-
+    pred_tags = [label_list[i] for i in smoothed_ids]
     segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration)
 
+    if merge_segments != "none":
+        segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
+
     if output_lab_path:
-        os.makedirs(os.path.dirname(output_lab_path), exist_ok=True)
+        dir_path = os.path.dirname(output_lab_path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
         save_lab(output_lab_path, segments_pred)
         print(f"Predictions saved to: {output_lab_path}")
 
@@ -72,24 +104,41 @@ def infer_audio(
 
 if __name__ == "__main__":
 
-    if len(sys.argv) < 3:
-        print("Usage: python infer.py <audio_path> <checkpoint_path> [<output_lab_path>] [<device>]")
+    if len(sys.argv) < 4:
+        print("Usage:")
+        print("Single file: python infer.py <audio_path> <checkpoint_path> <config_path> [<output_lab_path>] [<device>]")
+        print("Folder     : python infer.py --folder <folder_path> <checkpoint_path> <config_path> [<output_dir>] [<device>]")
         sys.exit(1)
 
-    audio_path = sys.argv[1]
-    checkpoint_path = sys.argv[2]
-    config_path = sys.argv[3]
-    output_lab_path = sys.argv[4] if len(sys.argv) > 3 else None
-    device = sys.argv[5] if len(sys.argv) > 4 else "cuda"
+    if sys.argv[1] == "--folder":
+        folder_path = sys.argv[2]
+        checkpoint_path = sys.argv[3]
+        config_path = sys.argv[4]
+        output_dir = sys.argv[5] if len(sys.argv) > 5 else "outputs"
+        device = sys.argv[6] if len(sys.argv) > 6 else "cuda"
 
-    segments = infer_audio(
-        audio_path=audio_path,
-        config_path=config_path,
-        checkpoint_path=checkpoint_path,
-        output_lab_path=output_lab_path,
-        device=device
-    )
+        infer_folder(
+            folder_path=folder_path,
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            output_dir=output_dir,
+            device=device
+        )
+    else:
+        audio_path = sys.argv[1]
+        checkpoint_path = sys.argv[2]
+        config_path = sys.argv[3]
+        output_lab_path = sys.argv[4] if len(sys.argv) > 4 else None
+        device = sys.argv[5] if len(sys.argv) > 5 else "cuda"
 
-    print("Predicted segments:")
-    for seg in segments:
-        print(seg)
+        segments = infer_audio(
+            audio_path=audio_path,
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            output_lab_path=output_lab_path,
+            device=device
+        )
+
+        print("Predicted segments:")
+        for seg in segments:
+            print(seg)
