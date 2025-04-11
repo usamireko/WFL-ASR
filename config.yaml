@@ -30,3 +30,7 @@ training:
 
 output:
   save_dir: "/content/checkpoints" # path to save folder
+  
+postprocess:
+  median_filter: 2 # 1 for no smoothing, higher the value, the more it smooths the prediction
+  merge_segments: "previous"  # right, left, previous, or none
