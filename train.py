@@ -1,4 +1,3 @@
-# train.py
 import os
 import json
 import yaml
@@ -167,6 +166,8 @@ def train():
 def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     model.eval()
     val_losses = []
+    median_filter_size = config["postprocess"]["median_filter"]
+    merge_segments = config["postprocess"]["merge_segments"]
 
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
@@ -182,8 +183,13 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
             val_losses.append(loss.item())
 
             id2label = {i: l for i, l in enumerate(label_list)}
-            pred_tags = [id2label[i] for i in torch.argmax(logits, dim=-1).squeeze(0).cpu().tolist()]
+            pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
+            if median_filter_size > 1:
+                pred_ids = median_filter(pred_ids, size=median_filter_size)
+            pred_tags = [id2label[i] for i in pred_ids]
             segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration)
+            if merge_segments != "none":
+                segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
 
             if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
                 segments_gt = segments_gt[0]
