@@ -107,3 +107,43 @@ def visualize_prediction(waveform, sample_rate, segments_pred, segments_gt=None,
     ax.set_xlabel("Time (s)")
     ax.set_ylim(-1, 1)
     return fig
+
+def merge_adjacent_segments(segments, mode="right"):
+    if not segments or mode == "none":
+        return segments
+
+    merged = []
+
+    if mode == "right":
+        merged = [segments[0]]
+        for start, end, ph in segments[1:]:
+            last_start, last_end, last_ph = merged[-1]
+            if ph == last_ph:
+                merged[-1] = (last_start, end, ph)
+            else:
+                merged.append((start, end, ph))
+    elif mode == "left":
+        i = 0
+        while i < len(segments):
+            if i > 0 and segments[i][2] == segments[i - 1][2]:
+                prev_start, prev_end, ph = merged.pop()
+                merged.append((prev_start, segments[i][1], ph))
+            else:
+                merged.append(segments[i])
+            i += 1
+    elif mode == "previous":
+        i = 0
+        while i < len(segments):
+            if i > 1 and segments[i - 1][2] == segments[i][2]:
+                if len(merged) >= 2:
+                    p0 = merged[-2]  # previous previous
+                    p1 = merged.pop()  # previous
+                    merged[-1] = (p0[0], segments[i][1], p0[2])
+                else:
+                    merged.append(segments[i])
+            else:
+                merged.append(segments[i])
+            i += 1
+    else:
+        raise ValueError(f"Unsupported merge mode: {mode}")
+    return merged
