@@ -10,18 +10,22 @@ model:
   whisper_model: "openai/whisper-base" # look at model_list.txt for more model types
   wavlm_model: "microsoft/wavlm-base" # same here, but the more advanced the base, the bigger and slower it trains
   freeze_encoder: false # false to finetune the encoder, true to not finetune
+  
   enable_bilstm: true
   bilstm_num_layer: 3
+  
   enable_dilated_conv: true
   dilated_conv_depth: 2
   dilated_conv_kernel: 3
-  enable_self_attn_polisher: true
-  self_attn_heads: 2 
+  
+  enable_self_attn_polisher: false
+  self_attn_heads: 2
+  
   num_conformer_layers: 2
   conformer_heads: 4
   conformer_ff_expansion: 4
   conformer_kernel_size: 31
-  conformer_dropout: 0.1
+  conformer_dropout: 0.15
 
 training:
   batch_size: 1 # 1 for full individual sample per batch, cant set this to anything else (cus not implemented)
