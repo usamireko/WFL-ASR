@@ -48,16 +48,17 @@ class PhonemeDataset(Dataset):
         label_ids = [self.label2id.get(tag, self.label2id["O"]) for tag in sample["bio_tags"]]
         label_ids = torch.tensor(label_ids, dtype=torch.long)
 
-        return input_values, label_ids, wav, sample["phoneme_segments"], sample["wav_path"]
+        return input_values, label_ids, wav, sample["phoneme_segments"], sample["wav_path"], sample["lang_id"]
 
 def run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config):
     model.train()
     for batch in train_loader:
-        input_values, label_ids, wav, _, _ = batch
+        input_values, label_ids, wav, _, _, lang_id= batch
         input_values = input_values[0].cuda()
         label_ids = label_ids[0].cuda()
+        lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-        logits = model(input_values)
+        logits = model(input_values, lang_id)
         logits = logits.squeeze(0)
         min_len = min(logits.size(0), label_ids.size(0))
         loss = criterion(logits[:min_len], label_ids[:min_len])
@@ -100,8 +101,8 @@ def run_validation(model, val_loader, label_list, config, writer, step, best_los
 
     return best_loss
 
-def train():
-    with open("config.yaml") as f:
+def train(config="config.yaml"):
+    with open(config, "r") as f:
         config = yaml.safe_load(f)
 
     os.makedirs(config["output"]["save_dir"], exist_ok=True)
@@ -131,7 +132,7 @@ def train():
         lr=config["training"]["learning_rate"],
         weight_decay=config["training"]["weight_decay"]
     )
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=config["training"].get("label_smoothing", 0.0))
     writer = SummaryWriter(config["training"]["log_dir"])
 
     step = 0
@@ -172,11 +173,12 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
 
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
-            input_values, label_ids, wav, segments_gt, _ = batch
+            input_values, label_ids, wav, segments_gt, _, lang_id  = batch
             input_values = input_values[0].cuda()
             label_ids = label_ids[0].cuda()
+            lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-            logits = model(input_values)
+            logits = model(input_values, lang_id)
             logits = logits.squeeze(0)
 
             min_len = min(logits.size(0), label_ids.size(0))
@@ -204,4 +206,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     return avg_loss
 
 if __name__ == "__main__":
-    train()
+    train("/content/drive/MyDrive/WFL_4/config.yaml")
