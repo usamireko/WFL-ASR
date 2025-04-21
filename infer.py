@@ -5,7 +5,7 @@ import yaml
 import soundfile as sf
 import torchaudio
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments
+from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs
 from scipy.ndimage import median_filter
 
 frame_duration = 0.02  # ~20ms per frame
@@ -45,7 +45,8 @@ def infer_audio(
     config_path: str = "config.yaml",
     checkpoint_path: str = "best_model.pt",
     output_lab_path: str = None,
-    device: str = "cuda"
+    device: str = "cuda",
+    lang_id: int = None
 ):
     """
     audio_path: path to the .wav file to transcribe
@@ -79,12 +80,28 @@ def infer_audio(
 
     input_values = torch.tensor(audio, dtype=torch.float32).to(device)
 
-    with torch.no_grad():
-        # the model expects shape [batch_size=1, T] inside forward
-        # logits shape: [1, frames, num_classes]
-        logits = model(input_values)
+    logits_list = []
 
-    pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
+    lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+
+    if lang_id is not None:
+        lang_name = next((k for k, v in lang2id.items() if v == lang_id), f"unknown_id_{lang_id}")
+        print(f"Inferencing with lang_id {lang_id} ({lang_name})")
+
+        lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
+        logits = model(input_values, lang_tensor)
+        logits_list.append(logits)
+    else:
+        for lang_name, lid in lang2id.items():
+            print(f"Inferencing with lang_id {lid} ({lang_name})")
+            lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
+            logits = model(input_values, lang_tensor)
+            logits_list.append(logits)
+
+    stacked_logits = torch.stack(logits_list)  # [N_langs, 1, T, C]
+    avg_logits = torch.mean(stacked_logits, dim=0)  # [1, T, C]
+
+    pred_ids = torch.argmax(avg_logits, dim=-1).squeeze(0).cpu().numpy()
     smoothed_ids = median_filter(pred_ids, size=median_filter_size)
 
     pred_tags = [label_list[i] for i in smoothed_ids]
@@ -110,6 +127,13 @@ if __name__ == "__main__":
         print("Folder     : python infer.py --folder <folder_path> <checkpoint_path> <config_path> [<output_dir>] [<device>]")
         sys.exit(1)
 
+    lang_id = None
+    if "--lang_id" in sys.argv:
+        lang_idx = sys.argv.index("--lang_id")
+        lang_id = int(sys.argv[lang_idx + 1])
+        sys.argv.pop(lang_idx + 1)
+        sys.argv.pop(lang_idx)
+
     if sys.argv[1] == "--folder":
         folder_path = sys.argv[2]
         checkpoint_path = sys.argv[3]
@@ -122,7 +146,8 @@ if __name__ == "__main__":
             config_path=config_path,
             checkpoint_path=checkpoint_path,
             output_dir=output_dir,
-            device=device
+            device=device,
+            lang_id=lang_id
         )
     else:
         audio_path = sys.argv[1]
@@ -136,7 +161,8 @@ if __name__ == "__main__":
             config_path=config_path,
             checkpoint_path=checkpoint_path,
             output_lab_path=output_lab_path,
-            device=device
+            device=device,
+            lang_id=lang_id
         )
 
         print("Predicted segments:")
