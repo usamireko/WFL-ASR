@@ -76,6 +76,10 @@ class BIOPhonemeTagger(nn.Module):
         else:
             raise ValueError("Unsupported encoder type. Use 'whisper' or 'wavlm'.")
 
+        self.lang_emb_dim = config["model"].get("lang_emb_dim", 64)
+        self.lang_emb = nn.Embedding(config["model"]["num_languages"], self.lang_emb_dim)
+        self.lang_proj = nn.Linear(hidden_size + self.lang_emb_dim, hidden_size)
+
         if self.freeze_encoder:
             for param in self.encoder.parameters():
                 param.requires_grad = False
@@ -119,7 +123,7 @@ class BIOPhonemeTagger(nn.Module):
         self.label2id = {label: i for i, label in enumerate(label_list)}
         self.id2label = {i: label for label, i in self.label2id.items()}
 
-    def forward(self, input_values):
+    def forward(self, input_values, lang_id=None):
         real_len = input_values.size(0)
         input_values = input_values.unsqueeze(0)  # [1, T]
 
@@ -134,6 +138,12 @@ class BIOPhonemeTagger(nn.Module):
             hidden_states = hidden_states[:, :num_frames, :]
         else:
             hidden_states = self.encoder(input_values).last_hidden_state
+
+        if lang_id is not None:
+            lang_embed = self.lang_emb(lang_id)  # [1, lang_emb_dim]
+            lang_embed = lang_embed.unsqueeze(1).expand(-1, hidden_states.size(1), -1)  # [1, T, lang_emb_dim]
+            hidden_states = torch.cat([hidden_states, lang_embed], dim=-1)  # [1, T, H + E]
+            hidden_states = self.lang_proj(hidden_states)  #project back to hidden size
 
         if self.enable_bilstm and self.bilstm is not None:
             hidden_states, _ = self.bilstm(hidden_states)
