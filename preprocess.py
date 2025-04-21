@@ -1,4 +1,3 @@
-# preprocess.py
 import os
 import glob
 import soundfile as sf
@@ -49,34 +48,44 @@ def to_bio_tags(phonemes, num_frames):
     return tags
 
 def preprocess(data_dir, config):
-    wav_files = sorted(glob.glob(os.path.join(data_dir, "*.wav")))
+    all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+    lang2id = {lang: i for i, lang in enumerate(all_lang_dirs)}
+
     dataset = []
     phoneme_set = set()
+    lang_phonemes = {}
 
-    for wav_path in tqdm(wav_files):
-        base = os.path.splitext(os.path.basename(wav_path))[0]
-        lab_path = os.path.join(data_dir, base + ".lab")
+    for lang in all_lang_dirs:
+        lang_path = os.path.join(data_dir, lang)
+        wav_files = sorted(glob.glob(os.path.join(lang_path, "*.wav")))
+        lang_phonemes[lang] = set()
 
-        if not os.path.exists(lab_path):
-            print(f"Missing label for {base}, skipping.")
-            continue
+        for wav_path in tqdm(wav_files, desc=f"[{lang}]"):
+            base = os.path.splitext(os.path.basename(wav_path))[0]
+            lab_path = os.path.join(lang_path, base + ".lab")
 
-        audio, sr = sf.read(wav_path)
-        duration = len(audio) / sr
-        num_frames = int(duration / frame_duration)
+            if not os.path.exists(lab_path):
+                print(f"Missing label for {base}, skipping.")
+                continue
 
-        phoneme_segments = parse_lab(lab_path)
-        for _, _, ph in phoneme_segments:
-            phoneme_set.add(ph)
+            audio, sr = sf.read(wav_path)
+            duration = len(audio) / sr
+            num_frames = int(duration / frame_duration)
 
-        bio_tags = to_bio_tags(phoneme_segments, num_frames)
+            phoneme_segments = parse_lab(lab_path)
+            for _, _, ph in phoneme_segments:
+                phoneme_set.add(ph)
+                lang_phonemes[lang].add(ph)
 
-        sample = {
-            "wav_path": wav_path,
-            "bio_tags": bio_tags,
-            "phoneme_segments": phoneme_segments
-        }
-        dataset.append(sample)
+            bio_tags = to_bio_tags(phoneme_segments, num_frames)
+
+            sample = {
+                "wav_path": wav_path,
+                "bio_tags": bio_tags,
+                "phoneme_segments": phoneme_segments,
+                "lang_id": lang2id[lang]
+            }
+            dataset.append(sample)
 
     save_dir = config["output"]["save_dir"]
     os.makedirs(save_dir, exist_ok=True)
@@ -85,7 +94,6 @@ def preprocess(data_dir, config):
     with open(dataset_json_path, "w") as f:
         json.dump(dataset, f, indent=2)
 
-    # Generate phoneme tag list
     all_tags = set()
     for ph in sorted(phoneme_set):
         all_tags.add(f"B-{ph}")
@@ -97,8 +105,25 @@ def preprocess(data_dir, config):
         for tag in sorted(all_tags):
             f.write(f"{tag}\n")
 
-    print(f"Processed {len(dataset)} samples.")
-    print(f"Generated {len(all_tags)} BIO labels -> {phoneme_txt_path}")
+    langs_txt_path = os.path.join(save_dir, "langs.txt")
+    with open(langs_txt_path, "w", encoding="utf-8") as f:
+        for lang, idx in lang2id.items():
+            f.write(f"{lang},{idx}\n")
+
+    print(f"\nProcessed {len(dataset)} samples.")
+    print(f"\nGenerated {len(all_tags)} BIO labels -> {phoneme_txt_path}")
+    print(f"\nSaved language mapping -> {langs_txt_path}")
+
+    print("\nPhoneme usage by language:")
+    for lang, phonemes in lang_phonemes.items():
+        sorted_phs = sorted(list(phonemes))
+        print(f"  {lang}: {sorted_phs}")
+
+    config["model"]["num_languages"] = len(all_lang_dirs)
+    updated_config_path = os.path.join(save_dir, "config.yaml")
+    with open(updated_config_path, "w") as f:
+        yaml.dump(config, f, sort_keys=False)
+    print(f"\nSaved updated config -> {updated_config_path}")
 
 if __name__ == "__main__":
     config = load_config()
