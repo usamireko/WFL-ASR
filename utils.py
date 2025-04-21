@@ -147,3 +147,11 @@ def merge_adjacent_segments(segments, mode="right"):
     else:
         raise ValueError(f"Unsupported merge mode: {mode}")
     return merged
+
+def load_langs(lang_path):
+    lang2id = {}
+    with open(lang_path, "r", encoding="utf-8") as f:
+        for line in f:
+            lang, idx = line.strip().split(",")
+            lang2id[lang] = int(idx)
+    return lang2id
