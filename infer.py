@@ -29,17 +29,20 @@ def infer_folder(
         full_audio_path = os.path.join(folder_path, wav_file)
         output_lab_path = os.path.join(output_dir, wav_file.replace(".wav", ".lab"))
 
-        print(f"Inferencing: {wav_file}")
+        print(f"\nInferencing: {wav_file}")
         segments = infer_audio(
             audio_path=full_audio_path,
             config_path=config_path,
             checkpoint_path=checkpoint_path,
             output_lab_path=output_lab_path,
-            device=device
+            device=device,
+            lang_id=lang_id
         )
 
+        print("Predicted segments:")
         for seg in segments:
-            print(seg)
+            start, end, ph = seg
+            print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
 
 def infer_audio(
     audio_path: str,
@@ -49,14 +52,6 @@ def infer_audio(
     device: str = "cuda",
     lang_id: int = None
 ):
-    """
-    audio_path: path to the .wav file to transcribe
-    config_path: path to the config.yaml file
-    checkpoint_path: path to the trained model checkpoint (.pt file)
-    output_lab_path: save predicted segments to this .lab file
-    device: "cuda" or "cpu". Make sure CUDA is available if using "cuda"
-    return: A list of predicted segments, where each segment is (start_time, end_time, phoneme)
-    """
     config = load_config(config_path)
     
     label_list = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
@@ -87,6 +82,8 @@ def infer_audio(
     encoder_outs = []
 
     if lang_id is not None:
+        lang_name = next((k for k, v in lang2id.items() if v == lang_id), f"unknown_id_{lang_id}")
+        print(f"Inferencing with lang_id {lang_id} ({lang_name})")
         lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
         output = model(input_values, lang_tensor)
         logits, encoder_out = output if isinstance(output, tuple) else (output, None)
@@ -101,8 +98,8 @@ def infer_audio(
             logits_list.append(logits)
             encoder_outs.append(encoder_out)
 
-    stacked_logits = torch.stack(logits_list)  # [N_langs, 1, T, C]
-    avg_logits = torch.mean(stacked_logits, dim=0)  # [1, T, C]
+    stacked_logits = torch.stack(logits_list)
+    avg_logits = torch.mean(stacked_logits, dim=0)
 
     pred_ids = torch.argmax(avg_logits, dim=-1).squeeze(0).cpu().numpy()
     smoothed_ids = median_filter(pred_ids, size=median_filter_size)
@@ -127,7 +124,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Usage:")
         print("Single file: python infer.py <audio_path> <checkpoint_path> <config_path> [<output_lab_path>] [<device>]")
-        print("Folder     : python infer.py --folder <folder_path> <checkpoint_path> <config_path> [<output_dir>] [<device>]")
+        print("Folder     : python infer.py --folder <folder_path> <checkpoint_path> <config_path> [<output_dir>] [<device>] [--lang_id <id>]")
         sys.exit(1)
 
     lang_id = None
@@ -152,6 +149,7 @@ if __name__ == "__main__":
             device=device,
             lang_id=lang_id
         )
+
     else:
         audio_path = sys.argv[1]
         checkpoint_path = sys.argv[2]
@@ -168,7 +166,7 @@ if __name__ == "__main__":
             lang_id=lang_id
         )
 
-    print("Predicted segments:")
-    for seg in segments:
-        start, end, ph = seg
-        print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
+        print("Predicted segments:")
+        for seg in segments:
+            start, end, ph = seg
+            print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
