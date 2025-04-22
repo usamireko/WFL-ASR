@@ -48,19 +48,12 @@ def infer_audio(
     device: str = "cuda",
     lang_id: int = None
 ):
-    """
-    audio_path: path to the .wav file to transcribe
-    config_path: path to the config.yaml file
-    checkpoint_path: path to the trained model checkpoint (.pt file)
-    output_lab_path: save predicted segments to this .lab file
-    device: "cuda" or "cpu". Make sure CUDA is available if using "cuda"
-    return: A list of predicted segments, where each segment is (start_time, end_time, phoneme)
-    """
     config = load_config(config_path)
     
     label_list = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
     median_filter_size = config["postprocess"]["median_filter"]
     merge_segments = config["postprocess"]["merge_segments"]
+    use_duration = config["model"].get("enable_duration_prediction", False)
 
     model = BIOPhonemeTagger(config, label_list)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
@@ -81,25 +74,33 @@ def infer_audio(
     input_values = torch.tensor(audio, dtype=torch.float32).to(device)
 
     logits_list = []
+    encoder_outs = []
 
     lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
 
     if lang_id is not None:
-        lang_name = next((k for k, v in lang2id.items() if v == lang_id), f"unknown_id_{lang_id}")
-        print(f"Inferencing with lang_id {lang_id} ({lang_name})")
-
         lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
-        logits = model(input_values, lang_tensor)
+        output = model(input_values, lang_tensor)
+        if isinstance(output, tuple):
+            logits, encoder_out = output
+        else:
+            logits, encoder_out = output, None
         logits_list.append(logits)
+        encoder_outs.append(encoder_out)
     else:
         for lang_name, lid in lang2id.items():
             print(f"Inferencing with lang_id {lid} ({lang_name})")
             lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
-            logits = model(input_values, lang_tensor)
+            output = model(input_values, lang_tensor)
+            if isinstance(output, tuple):
+                logits, encoder_out = output
+            else:
+                logits, encoder_out = output, None
             logits_list.append(logits)
+            encoder_outs.append(encoder_out)
 
-    stacked_logits = torch.stack(logits_list)  # [N_langs, 1, T, C]
-    avg_logits = torch.mean(stacked_logits, dim=0)  # [1, T, C]
+    stacked_logits = torch.stack(logits_list)
+    avg_logits = torch.mean(stacked_logits, dim=0)
 
     pred_ids = torch.argmax(avg_logits, dim=-1).squeeze(0).cpu().numpy()
     smoothed_ids = median_filter(pred_ids, size=median_filter_size)
@@ -109,6 +110,15 @@ def infer_audio(
 
     if merge_segments != "none":
         segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
+
+    if use_duration and encoder_outs:
+        avg_encoder_out = torch.mean(torch.stack(encoder_outs), dim=0)
+        duration_preds = model.predict_durations(avg_encoder_out, segments_pred)
+        if duration_preds.numel() > 0:
+            duration_preds = duration_preds.cpu().numpy()
+            for i, (start, _, ph) in enumerate(segments_pred):
+                dur_sec = duration_preds[i] * frame_duration
+                segments_pred[i] = (start, start + dur_sec, ph)
 
     if output_lab_path:
         dir_path = os.path.dirname(output_lab_path)
