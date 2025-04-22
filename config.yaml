@@ -12,18 +12,22 @@ model:
   freeze_encoder: false # false to finetune the encoder, true to not finetune
   
   enable_bilstm: true
-  bilstm_num_layer: 3
+  bilstm_num_layer: 2
   
   enable_dilated_conv: true
   dilated_conv_depth: 2
   dilated_conv_kernel: 3
   
+  enable_duration_prediction: true
+  duration_head_dim: 128
+  duration_loss_weight: 0.2
+  
   enable_self_attn_polisher: false
   self_attn_heads: 2
   
   num_conformer_layers: 2
-  conformer_heads: 4
-  conformer_ff_expansion: 4
+  conformer_heads: 2
+  conformer_ff_expansion: 2
   conformer_kernel_size: 31
   conformer_dropout: 0.15
 
