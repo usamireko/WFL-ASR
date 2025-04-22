@@ -118,6 +118,15 @@ class BIOPhonemeTagger(nn.Module):
         if self.enable_self_attn_polisher:
             self.self_attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=self.self_attn_heads, batch_first=True)
 
+        self.enable_duration_prediction = config["model"].get("enable_duration_prediction", True)
+        if self.enable_duration_prediction:
+            duration_head_dim = config["model"].get("duration_head_dim", 128)
+            self.duration_predictor = nn.Sequential(
+                nn.Linear(hidden_size, duration_head_dim),
+                nn.ReLU(),
+                nn.Linear(duration_head_dim, 1)
+            )
+
         self.classifier = nn.Linear(hidden_size, len(label_list))
         self.label_list = label_list
         self.label2id = {label: i for i, label in enumerate(label_list)}
@@ -158,6 +167,10 @@ class BIOPhonemeTagger(nn.Module):
             out, _ = self.self_attn(out, out, out)
 
         logits = self.classifier(out)
+        if self.enable_duration_prediction:
+            return logits, out
+        else:
+            return logits
         return logits
 
     def decode_predictions(self, logits):
@@ -166,3 +179,20 @@ class BIOPhonemeTagger(nn.Module):
 
     def id_to_label(self, ids):
         return [[self.id2label[i.item()] for i in seq] for seq in ids]
+
+    def predict_durations(self, hidden_states, phoneme_segments):
+        frame_duration = 0.02
+        predictions = []
+        for start, end, _ in phoneme_segments:
+            start_idx = int(start / frame_duration)
+            end_idx = int(end / frame_duration)
+            if end_idx >= hidden_states.shape[1]:
+                end_idx = hidden_states.shape[1] - 1
+            if start_idx >= hidden_states.shape[1]:
+                continue
+            span_feats = hidden_states[0, start_idx:end_idx + 1]
+            pooled = torch.mean(span_feats, dim=0)
+            pred = self.duration_predictor(pooled)
+            predictions.append(pred.squeeze(0))
+        return torch.stack(predictions) if predictions else torch.tensor([])
+
