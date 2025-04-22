@@ -170,4 +170,4 @@ if __name__ == "__main__":
     print("Predicted segments:")
     for seg in segments:
         start, end, ph = seg
-        print(f"({round(start, 1)}, {round(end, 1)}, {ph})")
+        print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
