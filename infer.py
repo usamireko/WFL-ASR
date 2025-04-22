@@ -19,7 +19,8 @@ def infer_folder(
     config_path: str = "config.yaml",
     checkpoint_path: str = "best_model.pt",
     output_dir: str = "outputs",
-    device: str = "cuda"
+    device: str = "cuda",
+    lang_id: int = None
 ):
     wav_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".wav")]
     os.makedirs(output_dir, exist_ok=True)
