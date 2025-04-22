@@ -53,15 +53,35 @@ class PhonemeDataset(Dataset):
 def run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config):
     model.train()
     for batch in train_loader:
-        input_values, label_ids, wav, _, _, lang_id= batch
+        input_values, label_ids, wav, segments_gt, _, lang_id= batch
         input_values = input_values[0].cuda()
         label_ids = label_ids[0].cuda()
         lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-        logits = model(input_values, lang_id)
+        outputs = model(input_values, lang_id)
+        if isinstance(outputs, tuple):
+            logits, encoder_out = outputs
+        else:
+            logits = outputs
+            encoder_out = logits
         logits = logits.squeeze(0)
+
+        if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
+            segments_gt = segments_gt[0]
+        duration_preds = model.predict_durations(encoder_out.unsqueeze(0), segments_gt)
+        duration_targets = []
+        for start, end, _ in segments_gt:
+            dur = int((end - start) / frame_duration)
+            duration_targets.append(dur)
+        if duration_preds.numel() > 0:
+            duration_targets = torch.tensor(duration_targets, dtype=torch.float32).cuda()
+
         min_len = min(logits.size(0), label_ids.size(0))
         loss = criterion(logits[:min_len], label_ids[:min_len])
+
+        if duration_preds.numel() > 0 and len(duration_preds) == len(duration_targets):
+            duration_loss = nn.functional.l1_loss(duration_preds, duration_targets)
+            loss += config["model"].get("duration_loss_weight", 0.2) * duration_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -168,22 +188,46 @@ def train(config="config.yaml"):
 def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     model.eval()
     val_losses = []
+    duration_errors = []
+
     median_filter_size = config["postprocess"]["median_filter"]
     merge_segments = config["postprocess"]["merge_segments"]
 
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
-            input_values, label_ids, wav, segments_gt, _, lang_id  = batch
+            input_values, label_ids, wav, segments_gt, _, lang_id = batch
             input_values = input_values[0].cuda()
             label_ids = label_ids[0].cuda()
             lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-            logits = model(input_values, lang_id)
+            outputs = model(input_values, lang_id)
+            if isinstance(outputs, tuple):
+                logits, encoder_out = outputs
+            else:
+                logits = outputs
+                encoder_out = logits
             logits = logits.squeeze(0)
 
             min_len = min(logits.size(0), label_ids.size(0))
             loss = criterion(logits[:min_len], label_ids[:min_len])
             val_losses.append(loss.item())
+
+            if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
+                segments_gt = segments_gt[0]
+            duration_preds = model.predict_durations(encoder_out.unsqueeze(0), segments_gt)
+            duration_targets = []
+
+            for start, end, _ in segments_gt:
+                dur = int((end - start) / frame_duration)
+                duration_targets.append(dur)
+            if duration_preds.numel() > 0:
+                duration_targets = torch.tensor(duration_targets, dtype=torch.float32).cuda()
+
+            if duration_preds.numel() > 0 and len(duration_preds) == len(duration_targets):
+                duration_mae = torch.abs(duration_preds - duration_targets).mean().item()
+                duration_errors.append(duration_mae)
+                writer.add_scalar("val/duration_mae", duration_mae, step)
+                print(f" | Duration MAE: {duration_mae:.2f}", end="")
 
             id2label = {i: l for i, l in enumerate(label_list)}
             pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
@@ -194,16 +238,20 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
             if merge_segments != "none":
                 segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
 
-            if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
-                segments_gt = segments_gt[0]
-
             fig = visualize_prediction(wav[0], config["data"]["sample_rate"], segments_pred, segments_gt)
             writer.add_figure(f"val/prediction_{i}", fig, global_step=step)
 
     avg_loss = sum(val_losses) / len(val_losses)
     writer.add_scalar("val/loss", avg_loss, step)
+
+    if duration_errors:
+        avg_duration_mae = sum(duration_errors) / len(duration_errors)
+        writer.add_scalar("val/avg_duration_mae", avg_duration_mae, step)
+        print(f"\n[Validation] Avg Duration MAE: {avg_duration_mae:.2f}")
+
     print(f"\n[Validation] Avg Loss: {avg_loss:.4f}")
     return avg_loss
 
+
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_4/config.yaml")
+    train("/content/drive/MyDrive/WFL_5/config.yaml")
