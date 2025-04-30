@@ -24,7 +24,6 @@ The encoded features go through a stack of optional, configurable layers:
 - `BiLSTM` - sequential modeling (optional)
 - `Conformer Blocks` - long + short-term feature modeling
 - `Dilated Conv Stack` - local context enhancement (optional)
-- `Self-Attn Polisher` - smoothing and refining predictions (optional, experimental, not recommended)
 
 ### 4. Classification
 - A linear layer maps each time step to a BIO tag.
