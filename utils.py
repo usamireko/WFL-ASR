@@ -79,33 +79,42 @@ def visualize_prediction(waveform, sample_rate, segments_pred, segments_gt=None,
     time = np.linspace(0, duration, len(waveform))
 
     fig, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(time, waveform, alpha=0.6, label="Waveform")
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+    ax.plot(time, waveform, alpha=0.8, color="lightblue", zorder=0)
 
-    # Pred red
-    for (start, end, ph) in segments_pred:
+    for start, end, ph in segments_pred:
         ph = clean_label(ph)
-        ax.axvspan(start, end, color="red", alpha=0.2)
-        ax.text((start + end) / 2, 0.9, ph, color="red", ha="center", transform=ax.get_xaxis_transform(), fontsize=12)
+        text_pos = (start + end) / 2
+        if end - start > 0.02:
+            ax.text(text_pos, 0.9, ph, color="red", ha="center", va="bottom",
+                    transform=ax.get_xaxis_transform(), fontsize=12, zorder=3)
+        ax.axvline(start, color="red", linestyle="-", linewidth=0.6, alpha=0.5, zorder=2)
 
-    # GT greem
     if segments_gt:
         for item in segments_gt:
             if not isinstance(item, (list, tuple)) or len(item) != 3:
-                print(f"[WARN] Skipping malformed GT segment: {item}")
                 continue
-            start, end, ph = item
             try:
-                start = float(start)
-                end = float(end)
-                ph = clean_label(ph)
-                ax.axvspan(start, end, color="green", alpha=0.2)
-                ax.text((start + end) / 2, 0.7, ph, color="green", ha="center", transform=ax.get_xaxis_transform(), fontsize=12)
+                start, end, ph = float(item[0]), float(item[1]), clean_label(item[2])
+                text_pos = (start + end) / 2
+                if end - start > 0.02:
+                    ax.text(text_pos, 0.7, ph, color="green", ha="center", va="bottom",
+                            transform=ax.get_xaxis_transform(), fontsize=12, zorder=3)
+                ax.axvline(start, color="green", linestyle="-", linewidth=0.6, alpha=0.5, zorder=2)
             except Exception as e:
-                print(f"[ERROR] Failed to plot GT segment {item}: {e}") # training explodes with invalid segment
+                print(f"[ERROR] Failed to plot GT segment {item}: {e}")
 
     ax.set_title(title)
     ax.set_xlabel("Time (s)")
     ax.set_ylim(-1, 1)
+
+    legend_labels = [
+        plt.Line2D([], [], linestyle="none", marker='o', color="red", markersize=8, label="Pred"),
+        plt.Line2D([], [], linestyle="none", marker='o', color="green", markersize=8, label="GT"),
+    ]
+    ax.legend(handles=legend_labels, loc="upper right", frameon=True, fancybox=True, framealpha=0.6)
+
     return fig
 
 def merge_adjacent_segments(segments, mode="right"):
