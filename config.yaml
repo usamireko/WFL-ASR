@@ -33,12 +33,12 @@ model:
 training:
   batch_size: 1 # 1 for full individual sample per batch, cant set this to anything else (cus not implemented)
   num_workers: 4
-  learning_rate: 0.001
+  learning_rate: 0.0001
   lr_decay_gamma: 0.98 # learning rate decay gamma every val_check_interval
   weight_decay: 0.00001
   label_smoothing: 0.1 # prevent `overconfident` labels
   max_steps: 500000
-  val_check_interval: 1000
+  val_check_interval: 500
   max_checkpoints: 5
   log_dir: "/content/drive/MyDrive/WFL_9/logs" # path to logs folder for tensorboard
 
