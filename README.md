@@ -39,7 +39,7 @@ The encoded features go through a stack of optional, configurable layers:
 
 - Whisper/WavLM encoder support
 - Frame-level BIO tag training
-- Configurable architecture (BiLSTM, Conformer, Conv, Attention)
+- Configurable architecture (BiLSTM, Conformer, Conv)
 - HTK-compatible `.lab` output format
 
 ---
