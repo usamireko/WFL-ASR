@@ -182,9 +182,6 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
         loss.backward()
         optimizer.step()
 
-        for i, param_group in enumerate(optimizer.param_groups):
-            writer.add_scalar(f"train/lr_group_{i}", param_group["lr"], step)
-
         step += 1
         writer.add_scalar("train/loss", loss.item(), step)
         print(f"\r[Step {step}] Loss: {loss.item():.4f}", end="")
@@ -282,7 +279,7 @@ def train(config="config.yaml"):
         step, do_validate = run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config)
         if do_validate:
             best_loss = run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion)
-            scheduler.step()
+            scheduler.step(step)
             new_lr = optimizer.param_groups[0]["lr"]
             writer.add_scalar("train/learning_rate", new_lr, step)
 
