@@ -1,5 +1,5 @@
 data:
-  data_dir: "/content/data" # folder that has *.wav and *.lab data
+  data_dir: "training_dataset" # folder that has *.wav and *.lab data
   sample_rate: 16000 # not doing 44.1kHz cus both the encoders were trained on 16kHz- also its lighter to do ASR with lower sampling rate
   num_val_files: 10
   max_seq_len: null # no limits of phonemes amount in a segment (full segment)
@@ -17,13 +17,9 @@ model:
   enable_dilated_conv: true
   dilated_conv_depth: 2
   dilated_conv_kernel: 3
-  
-  enable_duration_prediction: true
-  duration_head_dim: 128
-  duration_loss_weight: 0.2
-  
-  enable_self_attn_polisher: false
-  self_attn_heads: 2
+
+  segmental_loss_weight: 1.0
+  segmental_loss_weights: [1.0, 1.0, 2.0] # [start_error, end_error, 1 - IoU]
   
   num_conformer_layers: 2
   conformer_heads: 2
@@ -37,16 +33,17 @@ model:
 training:
   batch_size: 1 # 1 for full individual sample per batch, cant set this to anything else (cus not implemented)
   num_workers: 4
-  learning_rate: 0.0001
+  learning_rate: 0.001
+  lr_decay_gamma: 0.98 # learning rate decay gamma every val_check_interval
   weight_decay: 0.00001
   label_smoothing: 0.1 # prevent `overconfident` labels
-  max_steps: 50000
-  val_check_interval: 500
+  max_steps: 500000
+  val_check_interval: 1000
   max_checkpoints: 5
-  log_dir: "/content/logs" # path to logs folder for tensorboard
+  log_dir: "/content/drive/MyDrive/WFL_9/logs" # path to logs folder for tensorboard
 
 output:
-  save_dir: "/content/checkpoints" # path to save folder
+  save_dir: "/content/drive/MyDrive/WFL_9" # path to save folder
   
 postprocess:
   median_filter: 2 # 1 for no smoothing, higher the value, the more it smooths the prediction
