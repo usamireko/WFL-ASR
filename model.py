@@ -40,11 +40,9 @@ class ConformerBlock(nn.Module):
         x = x + 0.5 * self.ff1(x)
         attn_out, _ = self.self_attn(x, x, x)
         x = self.ln1(x + attn_out)
-
         x_ln = self.ln2(x)
         x_conv = self.conv(x_ln.transpose(1, 2)).transpose(1, 2)
         x = x + x_conv
-
         x = x + 0.5 * self.ff2(x)
         return x
 
@@ -53,7 +51,7 @@ class BIOPhonemeTagger(nn.Module):
         super().__init__()
         encoder_type = config["model"]["encoder_type"].lower()
         model_name = config["model"]["whisper_model"] if encoder_type == "whisper" else config["model"]["wavlm_model"]
-        
+
         self.encoder_type = encoder_type
         self.freeze_encoder = config["model"].get("freeze_encoder", False)
         self.enable_bilstm = config["model"].get("enable_bilstm", True)
@@ -61,9 +59,6 @@ class BIOPhonemeTagger(nn.Module):
         self.enable_dilated_conv = config["model"].get("enable_dilated_conv", True)
         self.dilated_conv_depth = config["model"].get("dilated_conv_depth", 2)
         self.dilated_conv_kernel = config["model"].get("dilated_conv_kernel", 3)
-
-        self.enable_self_attn_polisher = config["model"].get("enable_self_attn_polisher", True)
-        self.self_attn_heads = config["model"].get("self_attn_heads", 2)
 
         if encoder_type == "whisper":
             self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
@@ -115,18 +110,6 @@ class BIOPhonemeTagger(nn.Module):
                 convs.append(nn.ReLU())
             self.dilated_conv_stack = nn.Sequential(*convs)
 
-        if self.enable_self_attn_polisher:
-            self.self_attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=self.self_attn_heads, batch_first=True)
-
-        self.enable_duration_prediction = config["model"].get("enable_duration_prediction", True)
-        if self.enable_duration_prediction:
-            duration_head_dim = config["model"].get("duration_head_dim", 128)
-            self.duration_predictor = nn.Sequential(
-                nn.Linear(hidden_size, duration_head_dim),
-                nn.ReLU(),
-                nn.Linear(duration_head_dim, 1)
-            )
-
         self.classifier = nn.Linear(hidden_size, len(label_list))
         self.label_list = label_list
         self.label2id = {label: i for i, label in enumerate(label_list)}
@@ -134,7 +117,7 @@ class BIOPhonemeTagger(nn.Module):
 
     def forward(self, input_values, lang_id=None):
         real_len = input_values.size(0)
-        input_values = input_values.unsqueeze(0)  # [1, T]
+        input_values = input_values.unsqueeze(0)
 
         features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
         input_features = features["input_features"].to(input_values.device)
@@ -149,28 +132,22 @@ class BIOPhonemeTagger(nn.Module):
             hidden_states = self.encoder(input_values).last_hidden_state
 
         if lang_id is not None:
-            lang_embed = self.lang_emb(lang_id)  # [1, lang_emb_dim]
-            lang_embed = lang_embed.unsqueeze(1).expand(-1, hidden_states.size(1), -1)  # [1, T, lang_emb_dim]
-            hidden_states = torch.cat([hidden_states, lang_embed], dim=-1)  # [1, T, H + E]
-            hidden_states = self.lang_proj(hidden_states)  #project back to hidden size
+            lang_embed = self.lang_emb(lang_id)
+            lang_embed = lang_embed.unsqueeze(1).expand(-1, hidden_states.size(1), -1)
+            hidden_states = torch.cat([hidden_states, lang_embed], dim=-1)
+            hidden_states = self.lang_proj(hidden_states)
 
         if self.enable_bilstm and self.bilstm is not None:
             hidden_states, _ = self.bilstm(hidden_states)
         out = hidden_states
+
         for layer in self.conformer_layers:
             out = layer(out)
 
         if self.enable_dilated_conv:
-            out = self.dilated_conv_stack(out.transpose(1, 2)).transpose(1, 2)  # [B, D, T] → [B, T, D]
-
-        if self.enable_self_attn_polisher:
-            out, _ = self.self_attn(out, out, out)
+            out = self.dilated_conv_stack(out.transpose(1, 2)).transpose(1, 2)
 
         logits = self.classifier(out)
-        if self.enable_duration_prediction:
-            return logits, out
-        else:
-            return logits
         return logits
 
     def decode_predictions(self, logits):
@@ -179,20 +156,3 @@ class BIOPhonemeTagger(nn.Module):
 
     def id_to_label(self, ids):
         return [[self.id2label[i.item()] for i in seq] for seq in ids]
-
-    def predict_durations(self, hidden_states, phoneme_segments):
-        frame_duration = 0.02
-        predictions = []
-        for start, end, _ in phoneme_segments:
-            start_idx = int(start / frame_duration)
-            end_idx = int(end / frame_duration)
-            if end_idx >= hidden_states.shape[1]:
-                end_idx = hidden_states.shape[1] - 1
-            if start_idx >= hidden_states.shape[1]:
-                continue
-            span_feats = hidden_states[0, start_idx:end_idx + 1]
-            pooled = torch.mean(span_feats, dim=0)
-            pred = self.duration_predictor(pooled)
-            predictions.append(pred.squeeze(0))
-        return torch.stack(predictions) if predictions else torch.tensor([])
-
