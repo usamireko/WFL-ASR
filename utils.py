@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 
 htk_time_factor = 1e7  # htk label uses 100ns units
 
-def decode_bio_tags(tags, frame_duration=0.02):
+def decode_bio_tags(tags, frame_duration=0.02, offsets=None):
     # bio2htk (start_time, end_time, phoneme)
     segments = []
     current_ph = None
@@ -15,16 +15,30 @@ def decode_bio_tags(tags, frame_duration=0.02):
     for i, tag in enumerate(tags):
         if tag == "O":
             if current_ph is not None:
-                end_time = i * frame_duration
-                segments.append((start_idx * frame_duration, end_time, current_ph))
+                end_idx = i
+                start_time = (start_idx + 0.5) * frame_duration
+                end_time = (end_idx + 0.5) * frame_duration
+
+                if offsets is not None:
+                    start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
+                    end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
+
+                segments.append((start_time, end_time, current_ph))
                 current_ph = None
                 start_idx = None
             continue
 
         if tag.startswith("B-"):
             if current_ph is not None:
-                end_time = i * frame_duration
-                segments.append((start_idx * frame_duration, end_time, current_ph))
+                end_idx = i
+                start_time = (start_idx + 0.5) * frame_duration
+                end_time = (end_idx + 0.5) * frame_duration
+
+                if offsets is not None:
+                    start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
+                    end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
+
+                segments.append((start_time, end_time, current_ph))
 
             current_ph = tag[2:]
             start_idx = i
@@ -32,16 +46,29 @@ def decode_bio_tags(tags, frame_duration=0.02):
         elif tag.startswith("I-"):
             ph = tag[2:]
             if current_ph != ph:
-                # mismatched I- tag without B-, treat it as B-
                 if current_ph is not None:
-                    end_time = i * frame_duration
-                    segments.append((start_idx * frame_duration, end_time, current_ph))
+                    end_idx = i
+                    start_time = (start_idx + 0.5) * frame_duration
+                    end_time = (end_idx + 0.5) * frame_duration
+
+                    if offsets is not None:
+                        start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
+                        end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
+
+                    segments.append((start_time, end_time, current_ph))
                 current_ph = ph
                 start_idx = i
 
     if current_ph is not None:
-        end_time = len(tags) * frame_duration
-        segments.append((start_idx * frame_duration, end_time, current_ph))
+        end_idx = len(tags) - 1
+        start_time = (start_idx + 0.5) * frame_duration
+        end_time = (end_idx + 0.5) * frame_duration
+
+        if offsets is not None and start_idx < len(offsets) and end_idx < len(offsets):
+            start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
+            end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
+
+        segments.append((start_time, end_time, current_ph))
 
     return segments
 
