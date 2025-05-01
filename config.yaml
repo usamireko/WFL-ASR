@@ -20,6 +20,8 @@ model:
 
   segmental_loss_weight: 1.0
   segmental_loss_weights: [1.0, 1.0, 2.0] # [start_error, end_error, 1 - IoU]
+
+  subframe_loss_weight: 1.0
   
   num_conformer_layers: 2
   conformer_heads: 2
@@ -38,12 +40,12 @@ training:
   weight_decay: 0.00001
   label_smoothing: 0.1 # prevent `overconfident` labels
   max_steps: 500000
-  val_check_interval: 500
+  val_check_interval: 2500
   max_checkpoints: 5
-  log_dir: "/content/drive/MyDrive/WFL_9/logs" # path to logs folder for tensorboard
+  log_dir: "/content/drive/MyDrive/WFL_10/logs" # path to logs folder for tensorboard
 
 output:
-  save_dir: "/content/drive/MyDrive/WFL_9" # path to save folder
+  save_dir: "/content/drive/MyDrive/WFL_10" # path to save folder
   
 postprocess:
   median_filter: 2 # 1 for no smoothing, higher the value, the more it smooths the prediction
