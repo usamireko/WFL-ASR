@@ -147,26 +147,25 @@ def compute_segmental_loss(segments_pred, segments_gt, loss_weights=(1.0, 1.0, 2
 
 def run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config):
     model.train()
+
     for batch in train_loader:
         input_values, label_ids, wav, segments_gt, _, lang_id = batch
         input_values = input_values[0].cuda()
         label_ids = label_ids[0].cuda()
         lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-        outputs = model(input_values, lang_id)
-        if isinstance(outputs, tuple):
-            logits, encoder_out = outputs
-        else:
-            logits = outputs
-
+        logits, offsets = model(input_values, lang_id)
         logits = logits.squeeze(0)
+        offsets = offsets.squeeze(0)  # [T, 2]
+
         min_len = min(logits.size(0), label_ids.size(0))
         loss = criterion(logits[:min_len], label_ids[:min_len])
+        loss = loss.mean()
 
-        pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
+        pred_ids = torch.argmax(logits, dim=-1).cpu().numpy()
         id2label = {i: l for i, l in enumerate(label_list)}
         pred_tags = [id2label[i] for i in pred_ids]
-        segments_pred = decode_bio_tags(pred_tags)
+        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration)
 
         if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
             segments_gt = segments_gt[0]
@@ -175,8 +174,38 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
             segments_pred, segments_gt,
             loss_weights=config["model"].get("segmental_loss_weights", (1.0, 1.0, 2.0))
         )
-
         loss += config["model"].get("segmental_loss_weight", 1.0) * segmental_loss
+
+        offset_loss = 0.0
+        offset_count = 0
+
+        for gt_start, gt_end, gt_ph in segments_gt:
+            start_frame = int(gt_start / frame_duration)
+            end_frame = int(gt_end / frame_duration)
+            start_offset_val = (gt_start / frame_duration) - start_frame
+            end_offset_val = (gt_end / frame_duration) - end_frame
+
+            start_offset = torch.tensor([start_offset_val], device=offsets.device)
+            end_offset = torch.tensor([end_offset_val], device=offsets.device)
+
+            if start_frame < offsets.size(0):
+                pred_start = offsets[start_frame, 0]
+                offset_loss += torch.abs(pred_start - start_offset)
+                offset_count += 1
+
+            if end_frame < offsets.size(0):
+                pred_end = offsets[end_frame, 1]
+                offset_loss += torch.abs(pred_end - end_offset)
+                offset_count += 1
+
+        if offset_count > 0:
+            offset_loss = offset_loss / offset_count
+        else:
+            offset_loss = torch.tensor(0.0, device=logits.device)
+        offset_loss = offset_loss.mean()
+
+        loss += config["model"].get("subframe_loss_weight", 1.0) * offset_loss
+        writer.add_scalar("train/offset_loss", offset_loss.item(), step)
 
         optimizer.zero_grad()
         loss.backward()
@@ -304,12 +333,9 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
             label_ids = label_ids[0].cuda()
             lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
 
-            outputs = model(input_values, lang_id)
-            if isinstance(outputs, tuple):
-                logits, _ = outputs
-            else:
-                logits = outputs
+            logits, offsets = model(input_values, lang_id)
             logits = logits.squeeze(0)
+            offsets = offsets.squeeze(0)
 
             min_len = min(logits.size(0), label_ids.size(0))
             loss = criterion(logits[:min_len], label_ids[:min_len])
@@ -324,7 +350,9 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
                 from scipy.ndimage import median_filter
                 pred_ids = median_filter(pred_ids, size=median_filter_size)
             pred_tags = [id2label[i] for i in pred_ids]
-            segments_pred = decode_bio_tags(pred_tags, frame_duration=0.02)
+
+            segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=offsets)
+
             if merge_segments != "none":
                 segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
 
@@ -354,4 +382,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_9/config.yaml")
+    train("/content/drive/MyDrive/WFL_10/config.yaml")
