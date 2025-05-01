@@ -1,9 +1,12 @@
-torch>=2.0.0
-torchaudio>=2.0.0
-transformers>=4.30.0
-soundfile>=0.12.1
-tqdm>=4.64.0
-numpy>=1.23.0
-PyYAML>=6.0
-matplotlib>=3.5.0
-scipy
+librosa==0.11.0
+matplotlib==3.10.1
+numpy==2.2.5
+PyYAML==6.0.2
+scipy==1.15.2
+soundfile==0.13.1
+tqdm==4.67.1
+transformers==4.51.3
+
+# RECOMMENDED: install torch manually. Environment used: Python 3.11
+#torch==2.6.0+cu124
+#torchaudio==2.6.0+cu124
