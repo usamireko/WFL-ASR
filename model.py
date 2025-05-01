@@ -111,6 +111,14 @@ class BIOPhonemeTagger(nn.Module):
             self.dilated_conv_stack = nn.Sequential(*convs)
 
         self.classifier = nn.Linear(hidden_size, len(label_list))
+
+        self.boundary_offset_head = nn.Sequential(
+            nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv1d(hidden_size, 2, kernel_size=1),  # [B, 2, T]
+            nn.Sigmoid()  # clamp to [0,1]
+        )
+
         self.label_list = label_list
         self.label2id = {label: i for i, label in enumerate(label_list)}
         self.id2label = {i: label for label, i in self.label2id.items()}
@@ -148,7 +156,8 @@ class BIOPhonemeTagger(nn.Module):
             out = self.dilated_conv_stack(out.transpose(1, 2)).transpose(1, 2)
 
         logits = self.classifier(out)
-        return logits
+        offsets = self.boundary_offset_head(out.transpose(1, 2)).transpose(1, 2)  # [B, T, 2]
+        return logits, offsets
 
     def decode_predictions(self, logits):
         pred_ids = torch.argmax(logits, dim=-1)
