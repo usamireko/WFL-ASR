@@ -49,7 +49,35 @@ def to_bio_tags(phonemes, num_frames):
 
 def preprocess(data_dir, config):
     all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
-    lang2id = {lang: i for i, lang in enumerate(all_lang_dirs)}
+    save_dir = config["output"]["save_dir"]
+    existing_lang2id = {}
+    existing_phonemes = set()
+
+    langs_txt_path = os.path.join(save_dir, "langs.txt")
+    phonemes_txt_path = os.path.join(save_dir, "phonemes.txt")
+
+    if os.path.exists(langs_txt_path):
+        with open(langs_txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) == 2:
+                    lang, idx = parts
+                    existing_lang2id[lang] = int(idx)
+
+    if os.path.exists(phonemes_txt_path):
+        with open(phonemes_txt_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and line != "O":
+                    if line.startswith("B-") or line.startswith("I-"):
+                        existing_phonemes.add(line[2:])
+
+    lang2id = dict(existing_lang2id)
+    next_lang_id = max(lang2id.values(), default=-1) + 1
+    for lang in all_lang_dirs:
+        if lang not in lang2id:
+            lang2id[lang] = next_lang_id
+            next_lang_id += 1
 
     dataset = []
     phoneme_set = set()
@@ -94,10 +122,9 @@ def preprocess(data_dir, config):
     with open(dataset_json_path, "w") as f:
         json.dump(dataset, f, indent=2)
 
-    all_tags = set()
-    for ph in sorted(phoneme_set):
-        all_tags.add(f"B-{ph}")
-        all_tags.add(f"I-{ph}")
+    merged_phonemes = set(existing_phonemes).union(phoneme_set)
+    all_tags = {f"B-{ph}" for ph in merged_phonemes}
+    all_tags.update({f"I-{ph}" for ph in merged_phonemes})
     all_tags.add("O")
 
     phoneme_txt_path = os.path.join(save_dir, "phonemes.txt")
@@ -119,7 +146,7 @@ def preprocess(data_dir, config):
         sorted_phs = sorted(list(phonemes))
         print(f"  {lang}: {sorted_phs}")
 
-    config["model"]["num_languages"] = len(all_lang_dirs)
+    config["model"]["num_languages"] = len(lang2id)
     updated_config_path = os.path.join(save_dir, "config.yaml")
     with open(updated_config_path, "w") as f:
         yaml.dump(config, f, sort_keys=False)
