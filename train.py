@@ -247,6 +247,10 @@ def train(config="config.yaml"):
     with open(config, "r") as f:
         config = yaml.safe_load(f)
 
+    finetune_config = config.get("finetuning", {})
+    enable_finetuning = finetune_config.get("enable", False)
+    finetune_model_path = finetune_config.get("model_path", "")
+
     os.makedirs(config["output"]["save_dir"], exist_ok=True)
 
     phoneme_path = os.path.join(config["output"]["save_dir"], "phonemes.txt")
@@ -269,6 +273,52 @@ def train(config="config.yaml"):
     val_loader = DataLoader(val_dataset, batch_size=1)
 
     model = BIOPhonemeTagger(config, label_list).cuda()
+
+    if enable_finetuning and os.path.exists(finetune_model_path):
+        print(f"[INFO] Loading finetune base model: {finetune_model_path}")
+        state_dict = torch.load(finetune_model_path, map_location="cuda")
+
+        old_langs = state_dict["lang_emb.weight"].shape[0]
+        new_langs = config["model"]["num_languages"]
+        if new_langs > old_langs:
+            print(f"[INFO] Expanding lang_emb from {old_langs} -> {new_langs}")
+            new_emb = nn.Embedding(new_langs, model.lang_emb.embedding_dim).cuda()
+            new_emb.weight.data[:old_langs] = state_dict["lang_emb.weight"]
+            new_emb.weight.data[old_langs:] = torch.randn_like(new_emb.weight[old_langs:]) * 0.01
+            model.lang_emb = new_emb
+            state_dict["lang_emb.weight"] = new_emb.weight
+
+        base_phoneme_path = finetune_model_path.replace("best_model.pt", "phonemes.txt")
+        if not os.path.exists(base_phoneme_path):
+            raise RuntimeError(f"Missing phoneme list for base model: {base_phoneme_path}")
+        old_label_list = load_phoneme_list(base_phoneme_path)
+        old_label2id = {l: i for i, l in enumerate(old_label_list)}
+        new_label2id = {l: i for i, l in enumerate(label_list)}
+
+        print(f"[INFO] Attempting partial reuse of classifier weights: {len(old_label_list)} -> {len(label_list)}")
+
+        new_out_dim = len(label_list)
+        new_classifier = nn.Linear(model.classifier.in_features, new_out_dim).cuda()
+        old_weight = state_dict["classifier.weight"]
+        old_bias = state_dict["classifier.bias"]
+
+        matched = 0
+        for label in old_label_list:
+            if label in new_label2id:
+                old_idx = old_label2id[label]
+                new_idx = new_label2id[label]
+                new_classifier.weight.data[new_idx] = old_weight[old_idx]
+                new_classifier.bias.data[new_idx] = old_bias[old_idx]
+                matched += 1
+
+        print(f"[INFO] Transferred weights for {matched} matching phoneme tags")
+
+        model.classifier = new_classifier
+        state_dict.pop("classifier.weight", None)
+        state_dict.pop("classifier.bias", None)
+
+        model.load_state_dict(state_dict, strict=False)
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config["training"]["learning_rate"],
@@ -382,4 +432,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_10/config.yaml")
+    train("/content/drive/MyDrive/WFL_11/config.yaml")
