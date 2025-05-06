@@ -46,7 +46,7 @@ training:
 
 finetuning:
   enable: false # enabling WLF finetuning
-  model_path: null
+  model_path: null # path to finetune model
 
 output:
   save_dir: "/content/drive/MyDrive/WFL_11" # path to save folder
