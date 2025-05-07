@@ -210,51 +210,54 @@ def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_
             print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 4:
-        print("Usage:")
-        print("Single file: python infer.py <audio_path> <checkpoint_path> <config_path> [<output_lab_path>] [<device>]")
-        print("Folder     : python infer.py --folder <folder_path> <checkpoint_path> <config_path> [<output_dir>] [<device>] [--lang_id <id>]")
-        sys.exit(1)
+    import click
+    from pathlib import Path
+    @click.command(help='Infer with WFL')
+    @click.argument('path', metavar='PATH')
+    @click.option('--checkpoint', '-ckpt', type=str, required=True, help='Path to WFL Checkpoint.')
+    @click.option('--config', '-c', type=str, required=True, help='Path to Config file.')
+    @click.option('--output', '-o', type=str, required=False, default=".", help='Path to output labels.')
+    @click.option('--lang-id', '-l', type=int, required=False, default=-1, help='Language ID.')
+    def main(path, checkpoint, config, output, lang_id) -> None:
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        folder = False
+        inf_path = Path(path)
+        checkpoint_path = Path(checkpoint)
+        config_path = Path(config)
+        if output == ".":
+            output_path = inf_path
+        if not inf_path.exists():
+            print(f"Unable to locate folder {str(inf_path)}")
+            sys.exit(1)
+        if inf_path.is_dir():
+            folder = True
 
-    lang_id = None
-    if "--lang_id" in sys.argv:
-        lang_idx = sys.argv.index("--lang_id")
-        lang_id = int(sys.argv[lang_idx + 1])
-        sys.argv.pop(lang_idx + 1)
-        sys.argv.pop(lang_idx)
+        if lang_id != -1:
+            lang_id += 1
+        else:
+            lang_id = 0
 
-    if sys.argv[1] == "--folder":
-        folder_path = sys.argv[2]
-        checkpoint_path = sys.argv[3]
-        config_path = sys.argv[4]
-        output_dir = sys.argv[5] if len(sys.argv) > 5 else "outputs"
-        device = sys.argv[6] if len(sys.argv) > 6 else "cuda"
+        if folder:
+            infer_folder(
+                folder_path=str(inf_path),
+                config_path=str(config_path),
+                checkpoint_path=str(checkpoint_path),
+                output_dir=str(output_path),
+                device=device,
+                lang_id=lang_id
+            )
+        else:
+            segments = infer_audio(
+                folder_path=str(inf_path),
+                config_path=str(config_path),
+                checkpoint_path=str(checkpoint_path),
+                output_dir=str(output_path),
+                device=device,
+                lang_id=lang_id
+            )
+            print("Predicted segments:")
+            for seg in segments:
+                start, end, ph = seg
+                print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
 
-        infer_folder(
-            folder_path=folder_path,
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            output_dir=output_dir,
-            device=device,
-            lang_id=lang_id
-        )
-    else:
-        audio_path = sys.argv[1]
-        checkpoint_path = sys.argv[2]
-        config_path = sys.argv[3]
-        output_lab_path = sys.argv[4] if len(sys.argv) > 4 else None
-        device = sys.argv[5] if len(sys.argv) > 5 else "cuda"
-
-        segments = infer_audio(
-            audio_path=audio_path,
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            output_lab_path=output_lab_path,
-            device=device,
-            lang_id=lang_id
-        )
-
-        print("Predicted segments:")
-        for seg in segments:
-            start, end, ph = seg
-            print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
+    main()
