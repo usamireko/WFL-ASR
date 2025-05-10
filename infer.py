@@ -250,10 +250,10 @@ if __name__ == "__main__":
             )
         else:
             segments = infer_audio(
-                folder_path=str(inf_path),
+                audio_path=str(inf_path),
                 config_path=str(config_path),
                 checkpoint_path=str(checkpoint_path),
-                output_dir=str(output_path),
+                output_lab_path=str(output_path),
                 device=device,
                 lang_id=lang_id
             )
