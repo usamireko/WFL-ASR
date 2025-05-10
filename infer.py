@@ -226,6 +226,8 @@ if __name__ == "__main__":
         config_path = Path(config)
         if output == ".":
             output_path = inf_path
+        else:
+            output_path = output
         if not inf_path.exists():
             print(f"Unable to locate folder {str(inf_path)}")
             sys.exit(1)
