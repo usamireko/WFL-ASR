@@ -76,16 +76,8 @@ def process_segments(model, segments, sr, config, device, lang_id=None):
 
         if lang_id is not None:
             # Check for OOR
-            try:
-              for lid in lang2id.values():
-                if lang_id <= lid:
-                  pass
-                else:
-                  raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({lid}) of this model.\n Languages and Codes available: {lang2id}")
-                  break
-            except ValueError as e:
-              print(e)
-              sys.exit(0)
+            if lang_id > max(lang2id.values()):
+              raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
 
             lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
             output = model(input_values, lang_tensor)
@@ -155,16 +147,8 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
 
         if lang_id is not None:
             # Check for OOR
-            try:
-              for lid in lang2id.values():
-                if lang_id <= lid:
-                  pass
-                else:
-                  raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({lid}) of this model.\n Languages and Codes available: {lang2id}")
-                  break
-            except ValueError as e:
-              print(e)
-              sys.exit(0)
+            if lang_id > max(lang2id.values()):
+              raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
             
             lt = torch.tensor([lang_id], dtype=torch.long).to(device)
             out = model(inp, lt)
