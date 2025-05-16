@@ -59,7 +59,32 @@ def align_phoneme_list(segments_pred, forced_list):
             result.append((s, e, f_ph))
     return result
 
-def process_segments(model, segments, sr, config, device, lang_id=None):
+def sample_from_logits(logits, k=5, temperature=1.0):
+    probs = torch.softmax(logits / temperature, dim=-1)
+    topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1)
+    topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
+    sampled = torch.multinomial(topk_probs, num_samples=1).squeeze(-1)
+    return topk_indices.gather(1, sampled.unsqueeze(-1)).squeeze(-1)
+
+def top_p_sample(logits, p=0.9, temperature=1.0):
+    probs = torch.softmax(logits / temperature, dim=-1)
+    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+    cum_probs = torch.cumsum(sorted_probs, dim=-1)
+
+    mask = cum_probs <= p
+    mask[..., 0] = True
+
+    filtered_probs = torch.zeros_like(probs)
+    for t in range(probs.size(0)):
+        valid_idx = sorted_indices[t][mask[t]]
+        filtered_probs[t][valid_idx] = probs[t][valid_idx]
+        filtered_probs[t] /= filtered_probs[t].sum()
+
+    sampled = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
+    return sampled
+
+def process_segments(model, segments, sr, config, device, lang_id=None,
+                     sample=False, top_k=0, top_p=0.0, temperature=1.0):
     all_segments = []
     current_time = 0.0
 
@@ -97,7 +122,17 @@ def process_segments(model, segments, sr, config, device, lang_id=None):
         avg_logits = torch.mean(torch.stack(logits_list), dim=0)
         avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
 
-        pred_ids = torch.argmax(avg_logits, dim=-1).squeeze(0).cpu().numpy()
+        logits_cpu = avg_logits.squeeze(0).cpu()
+
+        if sample:
+            if top_p > 0.0:
+                pred_ids = top_p_sample(logits_cpu, p=top_p, temperature=temperature).numpy()
+            elif top_k > 0:
+                pred_ids = sample_from_logits(logits_cpu, k=top_k, temperature=temperature).numpy()
+            else:
+                pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
+        else:
+            pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
         smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
 
         pred_tags = [model.id2label[i] for i in smoothed_ids]
@@ -109,7 +144,9 @@ def process_segments(model, segments, sr, config, device, lang_id=None):
 
     return all_segments
 
-def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt", output_lab_path=None, device="cuda", lang_id=None):
+def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt", 
+                output_lab_path=None, device="cuda", lang_id=None,
+                sample=False, top_k=0, top_p=0.0, temperature=1.0):
     config = load_config(config_path)
     phoneme_txt = audio_path.replace(".wav", ".txt")
     forced = None
@@ -137,7 +174,8 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
     if len(audio) / sr > MAX_SEGMENT_DURATION:
         print(f"Audio is too long ({len(audio)/sr:.1f}s), splitting...")
         segments = split_audio(audio, sr)
-        segments_pred = process_segments(model, segments, sr, config, device, lang_id)
+        segments_pred = process_segments(model, segments, sr, config, device, lang_id,
+                                         sample=sample, top_k=top_k, top_p=top_p, temperature=temperature)
     else:
         inp = torch.tensor(audio, dtype=torch.float32).to(device)
         lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
@@ -168,9 +206,19 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
         avg_logits = torch.mean(torch.stack(logits_list), dim=0)
         avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
 
-        pred_ids = torch.argmax(avg_logits, dim=-1).squeeze(0).cpu().numpy()
+        logits_cpu = avg_logits.squeeze(0).cpu()
+        if sample:
+            if top_p > 0.0:
+                pred_ids = top_p_sample(logits_cpu, p=top_p, temperature=temperature).numpy()
+            elif top_k > 0:
+                pred_ids = sample_from_logits(logits_cpu, k=top_k, temperature=temperature).numpy()
+            else:
+                pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
+        else:
+            pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
         smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
         tags = [labels[i] for i in smoothed_ids]
+
         segments_pred = decode_bio_tags(tags, frame_duration=frame_duration, offsets=avg_offsets)
 
     if config["postprocess"]["merge_segments"] != "none":
@@ -194,7 +242,9 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
 
     return segments_pred
 
-def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_path: str = "best_model.pt", output_dir: str = "outputs", device: str = "cuda", lang_id: int = None):
+def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_path: str = "best_model.pt",
+                 output_dir: str = "outputs", device: str = "cuda", lang_id: int = None,
+                 sample=False, top_k=0, top_p=0.0, temperature=1.0):
     wav_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".wav")]
     os.makedirs(output_dir, exist_ok=True)
 
@@ -204,14 +254,17 @@ def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_
 
         print(f"\nInferencing: {wav_file}")
         segments = infer_audio(
-            audio_path=full_audio_path,
-            config_path=config_path,
-            checkpoint_path=checkpoint_path,
-            output_lab_path=output_lab_path,
+            audio_path=str(full_audio_path),
+            config_path=str(config_path),
+            checkpoint_path=str(checkpoint_path),
+            output_lab_path=str(output_lab_path),
             device=device,
-            lang_id=lang_id
+            lang_id=lang_id,
+            sample=sample,
+            top_k=top_k,
+            top_p=top_p,
+            temperature=temperature
         )
-
         print("Predicted segments:")
         for seg in segments:
             start, end, ph = seg
@@ -226,7 +279,30 @@ if __name__ == "__main__":
     @click.option('--config', '-c', type=str, required=True, help='Path to Config file.')
     @click.option('--output', '-o', type=str, required=False, default=".", help='Path to output labels.')
     @click.option('--lang-id', '-l', type=int, required=False, default=None, help='Language ID.')
-    def main(path, checkpoint, config, output, lang_id) -> None:
+    @click.option('--sample', '-s', is_flag=True, help='Enable sampling instead of argmax')
+    @click.option('--top-k', '-tk', type=int, default=0, help='Top-K sampling (range: 1-20)')
+    @click.option('--top-p', '-tp', type=float, default=0.0, help='Top-P sampling (range: 0.1-1)')
+    @click.option('--temperature', '-temp', type=float, default=1.0, help='Sampling temperature (range: 0.1-2)')
+
+    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature) -> None:
+        # I feel like a yandere sim dev doing this
+        if sample:
+            if top_k <= 0 and top_p <= 0.0:
+                print("Sampling is enabled but neither --top-k nor --top-p is set.")
+                sys.exit(1)
+            if top_k > 0 and top_p > 0.0:
+                print("You can't use both --top-k and --top-p at the same time.")
+                sys.exit(1)
+            if top_k < 0:
+                print("top-k must be ≥ 1.")
+                sys.exit(1)
+            if top_p < 0.0 or top_p > 1.0:
+                print("top-p must be between 0.1 and 1.0.")
+                sys.exit(1)
+            if temperature <= 0.0:
+                print("temperature must be greater than 0.")
+                sys.exit(1)
+
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         folder = False
         inf_path = Path(path)
@@ -251,7 +327,11 @@ if __name__ == "__main__":
                 checkpoint_path=str(checkpoint_path),
                 output_dir=str(output_path),
                 device=device,
-                lang_id=lang_id
+                lang_id=lang_id,
+                sample=sample,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature
             )
         else:
             segments = infer_audio(
@@ -260,11 +340,14 @@ if __name__ == "__main__":
                 checkpoint_path=str(checkpoint_path),
                 output_lab_path=str(output_path),
                 device=device,
-                lang_id=lang_id
+                lang_id=lang_id,
+                sample=sample,
+                top_k=top_k,
+                top_p=top_p,
+                temperature=temperature
             )
             print("Predicted segments:")
             for seg in segments:
                 start, end, ph = seg
                 print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
-
     main()
