@@ -45,6 +45,8 @@ def correct_lab_boundaries(wav_path, predicted_boundaries, snap_threshold=snap_t
     if not os.path.exists(lab_path):
         return snapped_boundaries, original_boundaries
 
+    used_predicted = set()
+
     with open(lab_path, "r") as f:
         for line in f:
             parts = line.strip().split()
@@ -54,17 +56,53 @@ def correct_lab_boundaries(wav_path, predicted_boundaries, snap_threshold=snap_t
                 end_sec = float(end) / 1e7
                 original_boundaries.append((start_sec, end_sec, label))
 
-                closest_start = min(predicted_boundaries, key=lambda t: abs(t - start_sec)) if len(predicted_boundaries) > 0 else start_sec
-                closest_end = min(predicted_boundaries, key=lambda t: abs(t - end_sec)) if len(predicted_boundaries) > 0 else end_sec
-
-                if abs(closest_start - start_sec) <= snap_threshold:
+                closest_start = None
+                min_start_dist = snap_threshold + 1
+                for t in predicted_boundaries:
+                    if t in used_predicted:
+                        continue
+                    dist = abs(t - start_sec)
+                    if dist < min_start_dist:
+                        min_start_dist = dist
+                        closest_start = t
+                if closest_start is not None and min_start_dist <= snap_threshold:
                     start_sec = closest_start
-                if abs(closest_end - end_sec) <= snap_threshold:
+                    used_predicted.add(closest_start)
+
+                closest_end = None
+                min_end_dist = snap_threshold + 1
+                for t in predicted_boundaries:
+                    if t in used_predicted:
+                        continue
+                    dist = abs(t - end_sec)
+                    if dist < min_end_dist:
+                        min_end_dist = dist
+                        closest_end = t
+                if closest_end is not None and min_end_dist <= snap_threshold:
                     end_sec = closest_end
+                    used_predicted.add(closest_end)
 
                 snapped_boundaries.append((start_sec, end_sec, label))
     
     return snapped_boundaries, original_boundaries
+
+
+def write_predicted_boundaries(wav_path, predicted_boundaries, out_path=None):
+    if out_path is None:
+        txt_path = wav_path.replace(".wav", "_boundary.txt")
+    else:
+        txt_path = out_path
+
+    with open(txt_path, "w") as f:
+        for t in predicted_boundaries:
+            f.write(f"{t:.6f}\n")
+
+def load_predicted_boundaries(wav_path):
+    txt_path = wav_path.replace(".wav", "_boundary.txt")
+    if os.path.exists(txt_path):
+        with open(txt_path, "r") as f:
+            return [float(line.strip()) for line in f if line.strip()]
+    return None
 
 def visualize_audio_features(wav_path, y, sr, predicted_boundaries, flux, delta_mag, flux_times, 
                              snapped_boundaries=None, original_boundaries=None, save_path="features_plot.png"):
@@ -113,9 +151,17 @@ def write_lab(wav_path, snapped_boundaries, save_over=True, out_path=None):
     #print(f"corrected .lab file written to: {lab_path}")
 
 def process_file(wav_path, save_plot=False):
-    #print(f"Processing: {wav_path}")
     y, sr = librosa.load(wav_path, sr=16000)
-    predicted_boundaries, flux, delta_mag, flux_times = detect_boundaries(y, sr)
+
+    predicted_boundaries = load_predicted_boundaries(wav_path)
+    if predicted_boundaries is None:
+        print("[INFO] No pre-made boundary file detected, creating a new one")
+        predicted_boundaries, flux, delta_mag, flux_times = detect_boundaries(y, sr)
+        write_predicted_boundaries(wav_path, predicted_boundaries)
+    else:
+        print(f"[INFO] Found pre-made boundary file for {wav_path}, using it")
+        flux = delta_mag = flux_times = np.array([])
+
     snapped_boundaries, original_boundaries = correct_lab_boundaries(wav_path, predicted_boundaries)
 
     write_lab(wav_path, snapped_boundaries)
@@ -129,6 +175,9 @@ def process_file(wav_path, save_plot=False):
             snapped_boundaries, original_boundaries,
             save_path=plot_path
         )
+    boundary_path = wav_path.replace(".wav", "_boundary.txt")
+    if os.path.exists(boundary_path):
+        os.remove(boundary_path)
 
 def process_entry(entry, save_plot):
     process_file(entry, save_plot=save_plot)
