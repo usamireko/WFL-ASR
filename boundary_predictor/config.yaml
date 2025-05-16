@@ -1,0 +1,34 @@
+data:
+  data_dir: "training_dataset" # folder that has *.wav and *.lab data
+  sample_rate: 16000
+  n_fft: 1024 # FFT window size for mel
+  hop_length: 256 # hop size in samples (16ms at 16kHz)
+  n_mels: 80 # mel filterbanks num
+  sigma: 0.015 # Std dev for Gaussian in boundary spike map
+  spike_label_mode: "soft" # only "soft" for now, might try "hard" later
+  num_val_files: 10
+
+model:
+  in_channels: 80 # Number of mel channels
+  base_channels: 128 
+
+training:
+  inter_loss_weights:
+    mid1: 0.5
+    mid2: 0.25
+  batch_size: 32
+  num_workers: 4
+  learning_rate: 0.0002
+  weight_decay: 0.0
+  max_steps: 5000000
+  grad_clip: 1.0
+  log_interval: 10
+  val_interval: 5000
+  mel_noise_std: 0.05
+output:
+  save_dir: "/content/drive/MyDrive/Boundary_predictor"
+  log_dir: "/content/drive/MyDrive/Boundary_predictor/logs"
+
+postprocess:
+  threshold: 0.5 # Threshold for boundary activation from heatmap
+  min_separation_sec: 0.005 # minimum time between two boundaries (5ms)
