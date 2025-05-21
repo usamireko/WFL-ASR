@@ -128,16 +128,17 @@ class BIOPhonemeTagger(nn.Module):
         input_values = input_values.unsqueeze(0)
 
         features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
-        input_features = features["input_features"].to(input_values.device)
 
         if self.encoder_type == "whisper":
+            input_features = features["input_features"].to(input_values.device)
             encoder_outputs = self.encoder(input_features)
             hidden_states = encoder_outputs.last_hidden_state
             real_duration = real_len / 16000
             num_frames = int(real_duration / 0.02)
             hidden_states = hidden_states[:, :num_frames, :]
         else:
-            hidden_states = self.encoder(input_values).last_hidden_state
+            input_features = features["input_values"].to(input_values.device)
+            hidden_states = self.encoder(input_features).last_hidden_state
 
         if lang_id is not None:
             lang_embed = self.lang_emb(lang_id)
