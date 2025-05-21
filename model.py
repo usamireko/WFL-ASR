@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import WhisperFeatureExtractor, WhisperModel, WavLMModel, Wav2Vec2FeatureExtractor
+from transformers import WhisperFeatureExtractor, WhisperModel, WavLMModel, WavLMConfig, Wav2Vec2FeatureExtractor
 
 class FeedForwardModule(nn.Module):
     def __init__(self, dim, expansion=4, dropout=0.1):
@@ -66,7 +66,12 @@ class BIOPhonemeTagger(nn.Module):
             hidden_size = self.encoder.config.d_model
         elif encoder_type == "wavlm":
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-            self.encoder = WavLMModel.from_pretrained(model_name)
+            # bug fix
+            wavlm_config = WavLMConfig.from_pretrained(model_name)
+            wavlm_config.apply_spec_augment = False
+            wavlm_config.mask_time_prob = 0.0
+            wavlm_config.mask_time_length = 0
+            self.encoder = WavLMModel.from_pretrained(model_name, config=wavlm_config)
             hidden_size = self.encoder.config.hidden_size
         else:
             raise ValueError("Unsupported encoder type. Use 'whisper' or 'wavlm'.")
