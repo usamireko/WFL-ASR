@@ -5,8 +5,6 @@ from tqdm import tqdm
 import yaml
 import json
 
-frame_duration = 0.02  # ~20ms per frame
-
 def load_config(path="config.yaml"):
     with open(path, "r") as f:
         return yaml.safe_load(f)
@@ -32,7 +30,7 @@ def parse_lab(lab_path):
 
     return phonemes
 
-def to_bio_tags(phonemes, num_frames):
+def to_bio_tags(phonemes, num_frames, frame_duration):
     tags = ["O"] * num_frames
     for start, end, ph in phonemes:
         start_idx = int(start / frame_duration)
@@ -48,6 +46,7 @@ def to_bio_tags(phonemes, num_frames):
     return tags
 
 def preprocess(data_dir, config):
+    frame_duration = config["data"].get("frame_duration", 0.02)
     all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
     save_dir = config["output"]["save_dir"]
     existing_lang2id = {}
@@ -105,7 +104,7 @@ def preprocess(data_dir, config):
                 phoneme_set.add(ph)
                 lang_phonemes[lang].add(ph)
 
-            bio_tags = to_bio_tags(phoneme_segments, num_frames)
+            bio_tags = to_bio_tags(phoneme_segments, num_frames, frame_duration)
 
             sample = {
                 "wav_path": wav_path,
