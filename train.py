@@ -164,7 +164,7 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
         pred_ids = torch.argmax(logits, dim=-1).cpu().numpy()
         id2label = {i: l for i, l in enumerate(label_list)}
         pred_tags = [id2label[i] for i in pred_ids]
-        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration)
+        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=offsets)
 
         if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
             segments_gt = segments_gt[0]
