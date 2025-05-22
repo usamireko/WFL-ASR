@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torchaudio
 from transformers import WhisperFeatureExtractor, WhisperModel, WavLMModel, WavLMConfig, Wav2Vec2FeatureExtractor
 
 class FeedForwardModule(nn.Module):
@@ -65,6 +66,7 @@ class BIOPhonemeTagger(nn.Module):
             self.encoder = WhisperModel.from_pretrained(model_name).encoder
             hidden_size = self.encoder.config.d_model
         elif encoder_type == "wavlm":
+            from transformers import WavLMConfig
             self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
             # bug fix
             wavlm_config = WavLMConfig.from_pretrained(model_name)
@@ -73,8 +75,19 @@ class BIOPhonemeTagger(nn.Module):
             wavlm_config.mask_time_length = 0
             self.encoder = WavLMModel.from_pretrained(model_name, config=wavlm_config)
             hidden_size = self.encoder.config.hidden_size
+        elif encoder_type in ("none", "null"):
+            self.encoder = None
+            self.feature_extractor = None
+            self.mel_extractor = torchaudio.transforms.MelSpectrogram(
+                sample_rate=config["data"]["sample_rate"],
+                n_fft=400,
+                hop_length=int(config["data"].get("frame_duration", 0.02) * config["data"]["sample_rate"]),
+                n_mels=config["data"].get("n_mels", 80)
+            )
+            hidden_size = self.mel_extractor.n_mels
+
         else:
-            raise ValueError("Unsupported encoder type. Use 'whisper' or 'wavlm'.")
+            raise ValueError("Unsupported encoder type. Use 'whisper', 'wavlm', or 'none'.")
 
         self.lang_emb_dim = config["model"].get("lang_emb_dim", 64)
         self.lang_emb = nn.Embedding(config["model"]["num_languages"], self.lang_emb_dim)
@@ -132,18 +145,26 @@ class BIOPhonemeTagger(nn.Module):
         real_len = input_values.size(0)
         input_values = input_values.unsqueeze(0)
 
-        features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
+        if self.encoder_type in ("none", "null"):
+            input_features = self.mel_extractor(input_values).transpose(1, 2).to(input_values.device) # [B, T, Mel]
+            hidden_states = input_features
 
-        if self.encoder_type == "whisper":
+        elif self.encoder_type == "whisper":
+            features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
             input_features = features["input_features"].to(input_values.device)
             encoder_outputs = self.encoder(input_features)
             hidden_states = encoder_outputs.last_hidden_state
             real_duration = real_len / 16000
             num_frames = int(real_duration / 0.02)
             hidden_states = hidden_states[:, :num_frames, :]
-        else:
+
+        elif self.encoder_type == "wavlm":
+            features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
             input_features = features["input_values"].to(input_values.device)
             hidden_states = self.encoder(input_features).last_hidden_state
+
+        else:
+            raise ValueError("Invalid encoder_type")
 
         if lang_id is not None:
             lang_embed = self.lang_emb(lang_id)
