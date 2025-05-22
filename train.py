@@ -15,8 +15,6 @@ from model import BIOPhonemeTagger
 from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments
 from scipy.ndimage import median_filter
 
-frame_duration = 0.02 # ~20ms per frame
-
 class PhonemeDataset(Dataset):
     def __init__(self, dataset_path, label_list, max_seq_len=None):
         with open(dataset_path, "r") as f:
@@ -146,6 +144,7 @@ def compute_segmental_loss(segments_pred, segments_gt, loss_weights=(1.0, 1.0, 2
     return torch.tensor(total_loss / match_count, requires_grad=True)
 
 def run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config):
+    frame_duration = config["data"].get("frame_duration", 0.02)
     model.train()
 
     for batch in train_loader:
@@ -373,6 +372,7 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     total_ter = 0.0
     count = 0
 
+    frame_duration = config["data"].get("frame_duration", 0.02)
     median_filter_size = config["postprocess"]["median_filter"]
     merge_segments = config["postprocess"]["merge_segments"]
 
@@ -432,4 +432,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_11/config.yaml")
+    train("/content/drive/MyDrive/WFL_13_mel_20ms/config.yaml")
