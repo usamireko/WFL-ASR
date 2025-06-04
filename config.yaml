@@ -22,7 +22,7 @@ model:
   segmental_loss_weight: 1.0
   segmental_loss_weights: [1.0, 1.0, 2.0] # [start_error, end_error, 1 - IoU]
 
-  subframe_loss_weight: 1.0
+  subframe_loss_weight: 3.0
   
   num_conformer_layers: 2
   conformer_heads: 2
