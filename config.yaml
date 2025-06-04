@@ -45,6 +45,12 @@ training:
   max_checkpoints: 5
   log_dir: "/content/drive/MyDrive/WFL_13_mel_20ms/logs" # path to logs folder for tensorboard
 
+augmentation:
+  enable: true
+  noise_std: 0.005
+  prob: 0.5
+  volume_range: [0.9, 1.1]
+
 finetuning:
   enable: false # enabling WLF finetuning
   model_path: null # path to finetune model

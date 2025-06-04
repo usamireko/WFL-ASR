@@ -41,5 +41,20 @@ The encoded features go through a stack of optional, configurable layers:
 - Frame-level BIO tag training
 - Configurable architecture (BiLSTM, Conformer, Conv)
 - HTK-compatible `.lab` output format
+- Optional waveform augmentation via the `augmentation` config section
 
 ---
+
+## Augmentation Options
+
+The `config.yaml` file now includes an optional `augmentation` section used during training. When enabled it randomly applies volume scaling and Gaussian noise:
+
+```yaml
+augmentation:
+  enable: true
+  noise_std: 0.005      # standard deviation of Gaussian noise
+  prob: 0.5             # probability to augment a sample
+  volume_range: [0.9, 1.1]  # random scaling of audio volume
+```
+
+Disable augmentation by setting `enable: false`.

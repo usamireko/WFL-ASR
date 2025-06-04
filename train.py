@@ -16,12 +16,20 @@ from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_predic
 from scipy.ndimage import median_filter
 
 class PhonemeDataset(Dataset):
-    def __init__(self, dataset_path, label_list, max_seq_len=None):
+    def __init__(self, dataset_path, label_list, max_seq_len=None, aug_cfg=None):
         with open(dataset_path, "r") as f:
             self.samples = json.load(f)
         self.label_list = label_list
         self.label2id = {l: i for i, l in enumerate(label_list)}
         self.max_seq_len = max_seq_len
+        self.aug_cfg = {
+            "enable": False,
+            "prob": 1.0,
+            "noise_std": 0.0,
+            "volume_range": [1.0, 1.0],
+        }
+        if aug_cfg:
+            self.aug_cfg.update(aug_cfg)
 
     def __len__(self):
         return len(self.samples)
@@ -37,7 +45,15 @@ class PhonemeDataset(Dataset):
         if max_amp > 0:
             wav = wav / max_amp
         else:
-            wav = wav # apparently it dies on silence
+            wav = wav  # apparently it dies on silence
+
+        if self.aug_cfg.get("enable", False) and random.random() < self.aug_cfg.get("prob", 1.0):
+            scale = random.uniform(*self.aug_cfg.get("volume_range", [1.0, 1.0]))
+            wav = wav * scale
+            noise_std = self.aug_cfg.get("noise_std", 0.0)
+            if noise_std > 0:
+                wav = wav + np.random.normal(0.0, noise_std, wav.shape)
+            wav = np.clip(wav, -1.0, 1.0)
 
         input_values = torch.tensor(wav, dtype=torch.float32)
 
@@ -257,7 +273,8 @@ def train(config="config.yaml"):
 
     max_seq_conf = config["data"]["max_seq_len"]
     label_list = load_phoneme_list(phoneme_path)
-    dataset = PhonemeDataset(dataset_path, label_list, max_seq_conf)
+    aug_cfg = config.get("augmentation", {})
+    dataset = PhonemeDataset(dataset_path, label_list, max_seq_conf, aug_cfg)
 
     val_size = config["data"]["num_val_files"]
     train_size = len(dataset) - val_size
