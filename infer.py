@@ -84,45 +84,64 @@ def top_p_sample(logits, p=0.9, temperature=1.0):
     return sampled
 
 def process_segments(model, segments, sr, config, device, lang_id=None,
-                     sample=False, top_k=0, top_p=0.0, temperature=1.0):
+                    sample=False, top_k=0, top_p=0.0, temperature=1.0,
+                    cache_dir=None, base_name=None):
     all_segments = []
     current_time = 0.0
 
-    for segment in segments:
+    for idx, segment in enumerate(segments):
         if len(segment) > 0:
             segment = segment / (max(abs(segment)) + 1e-8)
 
-        input_values = torch.tensor(segment, dtype=torch.float32).to(device)
+        seg_logits = None
+        seg_offsets = None
 
-        logits_list = []
-        offsets_list = []
+        # Check cache
+        use_cache = cache_dir is not None and base_name is not None
+        if use_cache:
+            seg_logit_path = os.path.join(cache_dir, f"{base_name}_seg{idx}_logits.pt")
+            seg_offset_path = os.path.join(cache_dir, f"{base_name}_seg{idx}_offsets.pt")
+            if os.path.exists(seg_logit_path):
+                print(f"Loaded cached logits for segment {idx}")
+                seg_logits = torch.load(seg_logit_path, map_location=device, weights_only=False)
+                if os.path.exists(seg_offset_path):
+                    seg_offsets = torch.load(seg_offset_path, map_location=device, weights_only=False)
 
-        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+        if seg_logits is None:
+            input_values = torch.tensor(segment, dtype=torch.float32).to(device)
 
-        if lang_id is not None:
-            # Check for OOR
-            if lang_id > max(lang2id.values()):
-              raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
+            logits_list = []
+            offsets_list = []
 
-            lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
-            output = model(input_values, lang_tensor)
-            logits, offsets = output if isinstance(output, tuple) else (output, None)
-            logits_list.append(logits)
-            if offsets is not None:
-                offsets_list.append(offsets)
-        else:            
-            for lid in lang2id.values():
-                lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
+            lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+
+            if lang_id is not None:
+                if lang_id > max(lang2id.values()):
+                    raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
+                lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
                 output = model(input_values, lang_tensor)
                 logits, offsets = output if isinstance(output, tuple) else (output, None)
                 logits_list.append(logits)
                 if offsets is not None:
                     offsets_list.append(offsets)
+            else:
+                for lid in lang2id.values():
+                    lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
+                    output = model(input_values, lang_tensor)
+                    logits, offsets = output if isinstance(output, tuple) else (output, None)
+                    logits_list.append(logits)
+                    if offsets is not None:
+                        offsets_list.append(offsets)
 
-        avg_logits = torch.mean(torch.stack(logits_list), dim=0)
-        avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+            seg_logits = torch.mean(torch.stack(logits_list), dim=0)
+            seg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
 
-        logits_cpu = avg_logits.squeeze(0).cpu()
+            if use_cache:
+                torch.save(seg_logits, seg_logit_path)
+                if seg_offsets is not None:
+                    torch.save(seg_offsets, seg_offset_path)
+
+        logits_cpu = seg_logits.squeeze(0).cpu()
 
         if sample:
             if top_p > 0.0:
@@ -133,10 +152,10 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
                 pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
         else:
             pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
-        smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
 
+        smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
         pred_tags = [model.id2label[i] for i in smoothed_ids]
-        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=avg_offsets)
+        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=seg_offsets)
 
         shifted_segments = [(start + current_time, end + current_time, ph) for start, end, ph in segments_pred]
         all_segments.extend(shifted_segments)
@@ -168,43 +187,63 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
         audio = torchaudio.functional.resample(torch.tensor(audio), orig_freq=sr, new_freq=config["data"]["sample_rate"]).numpy()
         sr = config["data"]["sample_rate"]
 
+    #cache for re-inference
+    base_name = os.path.splitext(os.path.basename(audio_path))[0]
+    audio_dir = os.path.dirname(audio_path)
+    cache_dir = os.path.join(audio_dir, ".wfl_cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    logits_cache = os.path.join(cache_dir, f"{base_name}_logits.pt")
+    offsets_cache = os.path.join(cache_dir, f"{base_name}_offsets.pt")
+
+    avg_logits = None
+    avg_offsets = None
+
     if len(audio) > 0:
         audio = audio / (max(abs(audio)) + 1e-8)
 
     if len(audio) / sr > MAX_SEGMENT_DURATION:
         print(f"Audio is too long ({len(audio)/sr:.1f}s), splitting...")
         segments = split_audio(audio, sr)
-        segments_pred = process_segments(model, segments, sr, config, device, lang_id,
-                                         sample=sample, top_k=top_k, top_p=top_p, temperature=temperature)
+        segments_pred = process_segments(
+            model, segments, sr, config, device, lang_id,
+            sample=sample, top_k=top_k, top_p=top_p, temperature=temperature,
+            cache_dir=cache_dir, base_name=base_name)
     else:
-        inp = torch.tensor(audio, dtype=torch.float32).to(device)
-        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+        if os.path.exists(logits_cache):
+            print(f"Loaded cached logits for {base_name}")
+            avg_logits = torch.load(logits_cache, map_location=device, weights_only=False)
+            avg_offsets = torch.load(offsets_cache, map_location=device, weights_only=False) if os.path.exists(offsets_cache) else None
+        else:
+            inp = torch.tensor(audio, dtype=torch.float32).to(device)
+            lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
 
-        logits_list = []
-        offsets_list = []
+            logits_list = []
+            offsets_list = []
 
-        if lang_id is not None:
-            # Check for OOR
-            if lang_id > max(lang2id.values()):
-              raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
-            
-            lt = torch.tensor([lang_id], dtype=torch.long).to(device)
-            out = model(inp, lt)
-            logits, offsets = out if isinstance(out, tuple) else (out, None)
-            logits_list.append(logits)
-            if offsets is not None:
-                offsets_list.append(offsets)
-        else:            
-            for lid in lang2id.values():
-                lt = torch.tensor([lid], dtype=torch.long).to(device)
+            if lang_id is not None:
+                if lang_id > max(lang2id.values()):
+                    raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
+                lt = torch.tensor([lang_id], dtype=torch.long).to(device)
                 out = model(inp, lt)
                 logits, offsets = out if isinstance(out, tuple) else (out, None)
                 logits_list.append(logits)
                 if offsets is not None:
                     offsets_list.append(offsets)
+            else:
+                for lid in lang2id.values():
+                    lt = torch.tensor([lid], dtype=torch.long).to(device)
+                    out = model(inp, lt)
+                    logits, offsets = out if isinstance(out, tuple) else (out, None)
+                    logits_list.append(logits)
+                    if offsets is not None:
+                        offsets_list.append(offsets)
 
-        avg_logits = torch.mean(torch.stack(logits_list), dim=0)
-        avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+            avg_logits = torch.mean(torch.stack(logits_list), dim=0)
+            avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+
+            torch.save(avg_logits, logits_cache)
+            if avg_offsets is not None:
+                torch.save(avg_offsets, offsets_cache)
 
         logits_cpu = avg_logits.squeeze(0).cpu()
         if sample:
@@ -283,8 +322,9 @@ if __name__ == "__main__":
     @click.option('--top-k', '-tk', type=int, default=0, help='Top-K sampling (range: 1-20)')
     @click.option('--top-p', '-tp', type=float, default=0.0, help='Top-P sampling (range: 0.1-1)')
     @click.option('--temperature', '-temp', type=float, default=1.0, help='Sampling temperature (range: 0.1-2)')
+    @click.option('--device', '-d', type=str, default="auto", help='Device to use: "cuda", "cuda:0", or "cpu". Auto-detects if not specified.')
 
-    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature) -> None:
+    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature, device) -> None:
         # I feel like a yandere sim dev doing this
         if sample:
             if top_k <= 0 and top_p <= 0.0:
@@ -303,7 +343,12 @@ if __name__ == "__main__":
                 print("temperature must be greater than 0.")
                 sys.exit(1)
 
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        requested_device = device.lower()
+        # check anyway
+        if requested_device.startswith("cuda") and not torch.cuda.is_available():
+            device = "cpu"
+        else:
+            device = requested_device
         folder = False
         inf_path = Path(path)
         checkpoint_path = Path(checkpoint)
@@ -317,8 +362,8 @@ if __name__ == "__main__":
             sys.exit(1)
         if inf_path.is_dir():
             folder = True
-        if lang_id <= -1:
-          lang_id = None
+        if lang_id is not None and lang_id <= -1:
+            lang_id = None
 
         if folder:
             infer_folder(
