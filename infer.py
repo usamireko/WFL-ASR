@@ -83,6 +83,18 @@ def top_p_sample(logits, p=0.9, temperature=1.0):
     sampled = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
     return sampled
 
+def suppress_low_confidence(logits, id2label, threshold=0.5):
+    import torch
+    probs = torch.softmax(logits, dim=-1)
+    max_probs, pred_ids = torch.max(probs, dim=-1)
+    smoothed_tags = []
+    for prob, idx in zip(max_probs, pred_ids):
+        if prob < threshold:
+            smoothed_tags.append("O")
+        else:
+            smoothed_tags.append(id2label[idx.item()])
+    return smoothed_tags
+
 def process_segments(model, segments, sr, config, device, lang_id=None,
                     sample=False, top_k=0, top_p=0.0, temperature=1.0,
                     cache_dir=None, base_name=None):
@@ -96,7 +108,6 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
         seg_logits = None
         seg_offsets = None
 
-        # Check cache
         use_cache = cache_dir is not None and base_name is not None
         if use_cache:
             seg_logit_path = os.path.join(cache_dir, f"{base_name}_seg{idx}_logits.pt")
@@ -112,12 +123,11 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
 
             logits_list = []
             offsets_list = []
-
             lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
 
             if lang_id is not None:
                 if lang_id > max(lang2id.values()):
-                    raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
+                    raise ValueError(f"Language ID {lang_id} is invalid. Available: {lang2id}")
                 lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
                 output = model(input_values, lang_tensor)
                 logits, offsets = output if isinstance(output, tuple) else (output, None)
@@ -142,21 +152,17 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
                     torch.save(seg_offsets, seg_offset_path)
 
         logits_cpu = seg_logits.squeeze(0).cpu()
+        pred_tags = suppress_low_confidence(
+            logits_cpu, model.id2label,
+            threshold=config["postprocess"].get("confidence_threshold", 0.5)
+        )
 
-        if sample:
-            if top_p > 0.0:
-                pred_ids = top_p_sample(logits_cpu, p=top_p, temperature=temperature).numpy()
-            elif top_k > 0:
-                pred_ids = sample_from_logits(logits_cpu, k=top_k, temperature=temperature).numpy()
-            else:
-                pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
-        else:
-            pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
+        pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
+        if config["postprocess"]["median_filter"] > 1:
+            pred_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
+        pred_tags = [model.id2label[i] for i in pred_ids]
 
-        smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
-        pred_tags = [model.id2label[i] for i in smoothed_ids]
         segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=seg_offsets)
-
         shifted_segments = [(start + current_time, end + current_time, ph) for start, end, ph in segments_pred]
         all_segments.extend(shifted_segments)
         current_time += len(segment) / sr
@@ -255,10 +261,17 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
                 pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
         else:
             pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
-        smoothed_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
-        tags = [labels[i] for i in smoothed_ids]
+            
+        pred_tags = suppress_low_confidence(
+            logits_cpu, model.id2label,
+            threshold=config["postprocess"].get("confidence_threshold", 0.5)
+        )
+        pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
+        if config["postprocess"]["median_filter"] > 1:
+            pred_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
+        pred_tags = [model.id2label[i] for i in pred_ids]
 
-        segments_pred = decode_bio_tags(tags, frame_duration=frame_duration, offsets=avg_offsets)
+        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=avg_offsets)
 
     if config["postprocess"]["merge_segments"] != "none":
         segments_pred = merge_adjacent_segments(segments_pred, mode=config["postprocess"]["merge_segments"])
