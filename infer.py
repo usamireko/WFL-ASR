@@ -96,8 +96,8 @@ def suppress_low_confidence(logits, id2label, threshold=0.5):
     return smoothed_tags
 
 def process_segments(model, segments, sr, config, device, lang_id=None,
-                    sample=False, top_k=0, top_p=0.0, temperature=1.0,
-                    cache_dir=None, base_name=None):
+                     sample=False, top_k=0, top_p=0.0, temperature=1.0,
+                     cache_dir=None, base_name=None, confidence_threshold=0.0):
     all_segments = []
     current_time = 0.0
 
@@ -154,7 +154,7 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
         logits_cpu = seg_logits.squeeze(0).cpu()
         pred_tags = suppress_low_confidence(
             logits_cpu, model.id2label,
-            threshold=config["postprocess"].get("confidence_threshold", 0.5)
+            threshold=confidence_threshold
         )
 
         pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
@@ -171,7 +171,8 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
 
 def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt", 
                 output_lab_path=None, device="cuda", lang_id=None,
-                sample=False, top_k=0, top_p=0.0, temperature=1.0):
+                sample=False, top_k=0, top_p=0.0, temperature=1.0,
+                confidence_threshold=0.0):
     config = load_config(config_path)
     phoneme_txt = audio_path.replace(".wav", ".txt")
     forced = None
@@ -213,7 +214,7 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
         segments_pred = process_segments(
             model, segments, sr, config, device, lang_id,
             sample=sample, top_k=top_k, top_p=top_p, temperature=temperature,
-            cache_dir=cache_dir, base_name=base_name)
+            cache_dir=cache_dir, base_name=base_name, confidence_threshold=confidence_threshold)
     else:
         if os.path.exists(logits_cache):
             print(f"Loaded cached logits for {base_name}")
@@ -264,7 +265,7 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
             
         pred_tags = suppress_low_confidence(
             logits_cpu, model.id2label,
-            threshold=config["postprocess"].get("confidence_threshold", 0.5)
+            threshold=confidence_threshold
         )
         pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
         if config["postprocess"]["median_filter"] > 1:
@@ -296,7 +297,7 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
 
 def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_path: str = "best_model.pt",
                  output_dir: str = "outputs", device: str = "cuda", lang_id: int = None,
-                 sample=False, top_k=0, top_p=0.0, temperature=1.0):
+                 sample=False, top_k=0, top_p=0.0, temperature=1.0, confidence_threshold=0.0):
     wav_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".wav")]
     os.makedirs(output_dir, exist_ok=True)
 
@@ -315,7 +316,8 @@ def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_
             sample=sample,
             top_k=top_k,
             top_p=top_p,
-            temperature=temperature
+            temperature=temperature,
+            confidence_threshold=confidence_threshold
         )
         print("Predicted segments:")
         for seg in segments:
@@ -336,8 +338,9 @@ if __name__ == "__main__":
     @click.option('--top-p', '-tp', type=float, default=0.0, help='Top-P sampling (range: 0.1-1)')
     @click.option('--temperature', '-temp', type=float, default=1.0, help='Sampling temperature (range: 0.1-2)')
     @click.option('--device', '-d', type=str, default="auto", help='Device to use: "cuda", "cuda:0", or "cpu". Auto-detects if not specified.')
+    @click.option('--confidence-threshold', '-ct', type=float, default=None, help='Suppress predictions with low confidence. Set 0 to disable.')
 
-    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature, device) -> None:
+    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature, device, confidence_threshold):
         # I feel like a yandere sim dev doing this
         if sample:
             if top_k <= 0 and top_p <= 0.0:
@@ -366,6 +369,10 @@ if __name__ == "__main__":
         inf_path = Path(path)
         checkpoint_path = Path(checkpoint)
         config_path = Path(config)
+        config = load_config(config_path)
+        if confidence_threshold is None:
+            confidence_threshold = config["postprocess"].get("confidence_threshold", 0.0)
+            
         if output == ".":
             output_path = inf_path
         else:
@@ -389,7 +396,8 @@ if __name__ == "__main__":
                 sample=sample,
                 top_k=top_k,
                 top_p=top_p,
-                temperature=temperature
+                temperature=temperature,
+                confidence_threshold=confidence_threshold
             )
         else:
             segments = infer_audio(
@@ -402,7 +410,8 @@ if __name__ == "__main__":
                 sample=sample,
                 top_k=top_k,
                 top_p=top_p,
-                temperature=temperature
+                temperature=temperature,
+                confidence_threshold=confidence_threshold
             )
             print("Predicted segments:")
             for seg in segments:
