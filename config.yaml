@@ -61,3 +61,4 @@ output:
 postprocess:
   median_filter: 1 # 1 for no smoothing, higher the value, the more it smooths the prediction
   merge_segments: "right"  # right, left, previous, or none
+  confidence_threshold: 0.5 # range 0.0-1.0 | threshold for uncertain labels, 0 to disable
