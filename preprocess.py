@@ -143,6 +143,10 @@ def preprocess(data_dir, config):
     with open(dataset_json_path, "w") as f:
         json.dump(dataset, f, indent=2)
 
+    lang_phonemes_json_path = os.path.join(save_dir, "lang_phonemes.json")
+    with open(lang_phonemes_json_path, "w", encoding="utf-8") as f:
+        json.dump({k: sorted(list(v)) for k, v in lang_phonemes.items()}, f, indent=2, ensure_ascii=False)
+
     if reverse_map:
         merge_map_path = os.path.join(save_dir, "phoneme_merge_map.json")
         with open(merge_map_path, "w", encoding="utf-8") as f:
