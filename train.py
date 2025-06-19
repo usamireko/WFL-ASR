@@ -72,7 +72,7 @@ def clean_lab(ph_segment):
         ph = ph_segment
     while isinstance(ph, (tuple, list)) and len(ph) == 1:
         ph = ph[0]
-    return str(ph).split("/")[-1].lower()
+    return str(ph).split("/")[-1]
 
 def compute_framewise_accuracy(logits, labels):
     preds = torch.argmax(logits, dim=-1)
@@ -443,7 +443,7 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2
                     for s, e, ph in segments_pred
                 ]
                 vis_gt = [
-                    (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                    (s, e, canonical_to_lang(clean_lab(ph), lang_name, merge_map))
                     for s, e, ph in segments_gt
                 ]
 
