@@ -12,7 +12,7 @@ from tqdm import tqdm
 import soundfile as sf
 import torchaudio
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments
+from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang
 from scipy.ndimage import median_filter
 
 class PhonemeDataset(Dataset):
@@ -237,8 +237,8 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
 
     return step, False
     
-def run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion):
-    val_loss = evaluate(model, val_loader, label_list, config, writer, step, criterion)
+def run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion, id2lang, merge_map=None):
+    val_loss = evaluate(model, val_loader, label_list, config, writer, step, criterion, id2lang, merge_map)
 
     model_path = os.path.join(config["output"]["save_dir"], f"model_step{step}.pt")
     torch.save(model.state_dict(), model_path)
@@ -275,6 +275,13 @@ def train(config="config.yaml"):
     label_list = load_phoneme_list(phoneme_path)
     aug_cfg = config.get("augmentation", {})
     dataset = PhonemeDataset(dataset_path, label_list, max_seq_conf, aug_cfg)
+
+    lang_map_path = os.path.join(config["output"]["save_dir"], "langs.txt")
+    lang2id = load_langs(lang_map_path)
+    id2lang = {i: l for l, i in lang2id.items()}
+
+    merge_map_path = os.path.join(config["output"]["save_dir"], "phoneme_merge_map.json")
+    merge_map = load_phoneme_merge_map(merge_map_path) if os.path.exists(merge_map_path) else None
 
     val_size = config["data"]["num_val_files"]
     train_size = len(dataset) - val_size
@@ -373,7 +380,7 @@ def train(config="config.yaml"):
     while step < config["training"]["max_steps"]:
         step, do_validate = run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config)
         if do_validate:
-            best_loss = run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion)
+            best_loss = run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion, id2lang, merge_map)
             scheduler.step(step)
             new_lr = optimizer.param_groups[0]["lr"]
             writer.add_scalar("train/learning_rate", new_lr, step)
@@ -381,7 +388,7 @@ def train(config="config.yaml"):
     torch.save(model.state_dict(), os.path.join(config["output"]["save_dir"], "last_model.pt"))
     print("\nTraining complete at max_steps!")
 
-def evaluate(model, val_loader, label_list, config, writer, step, criterion):
+def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2lang, merge_map=None):
     model.eval()
     val_losses = []
     total_acc = 0.0
@@ -427,12 +434,30 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
             per = compute_phoneme_error_rate(segments_pred, segments_gt)
             ter = compute_timing_error(segments_pred, segments_gt)
 
+            lang_name = id2lang.get(lang_id.item(), None)
+            vis_pred = segments_pred
+            vis_gt = segments_gt
+            if merge_map and lang_name:
+                vis_pred = [
+                    (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                    for s, e, ph in segments_pred
+                ]
+                vis_gt = [
+                    (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                    for s, e, ph in segments_gt
+                ]
+
             total_acc += acc
             total_per += per
             total_ter += ter
             count += 1
 
-            fig = visualize_prediction(wav[0], config["data"]["sample_rate"], segments_pred, segments_gt)
+            fig = visualize_prediction(
+                wav[0],
+                config["data"]["sample_rate"],
+                vis_pred,
+                vis_gt,
+            )
             writer.add_figure(f"val/prediction_{i}", fig, global_step=step)
 
     avg_loss = sum(val_losses) / len(val_losses)
@@ -449,4 +474,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion):
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_13_mel_20ms/config.yaml")
+    train("/content/drive/MyDrive/WFL_merge/config.yaml")
