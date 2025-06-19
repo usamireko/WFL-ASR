@@ -72,8 +72,8 @@ training:
   merged_phoneme_groups:
     - ["merged_1", "en/ah", "ja/a"]
     - ["merged_2", "en/ih", "ja/i"]
-    - ["merged_3", "en/AP", "ja/AP"]
-    - ["merged_4", "en/SP", "ja/SP"]
+    - ["custom_var", "en/AP", "ja/AP"]
+    - ["CustomVar", "en/SP", "ja/SP"]
 ```
 
 During preprocessing these phonemes are replaced with the merged label. For
