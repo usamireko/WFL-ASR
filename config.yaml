@@ -44,6 +44,7 @@ training:
   val_check_interval: 2500
   max_checkpoints: 5
   log_dir: "/content/drive/MyDrive/WFL_13_mel_20ms/logs" # path to logs folder for tensorboard
+  merged_phoneme_groups: [] # groups of phonemes across languages that should share a label
 
 augmentation:
   enable: true
