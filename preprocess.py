@@ -47,6 +47,7 @@ def to_bio_tags(phonemes, num_frames, frame_duration):
 
 def build_merge_map(groups):
     merge_map = {}
+    reverse_map = {}
     for group in groups or []:
         if not isinstance(group, (list, tuple)) or len(group) < 2:
             continue
@@ -59,12 +60,13 @@ def build_merge_map(groups):
                 continue
             lang, ph = item.split("/", 1)
             merge_map.setdefault(lang, {})[ph] = canonical_ph
-    return merge_map
+            reverse_map.setdefault(canonical_ph, {})[lang] = ph
+    return merge_map, reverse_map
     
 def preprocess(data_dir, config):
     frame_duration = config["data"].get("frame_duration", 0.02)
     all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
-    merge_map = build_merge_map(config.get("merged_phoneme_groups", []))
+    merge_map, reverse_map = build_merge_map(config.get("merged_phoneme_groups", []))
     save_dir = config["output"]["save_dir"]
     existing_lang2id = {}
     existing_phonemes = set()
@@ -140,10 +142,11 @@ def preprocess(data_dir, config):
     dataset_json_path = os.path.join(save_dir, "dataset.json")
     with open(dataset_json_path, "w") as f:
         json.dump(dataset, f, indent=2)
-    
-    lang_phonemes_json_path = os.path.join(save_dir, "lang_phonemes.json")
-    with open(lang_phonemes_json_path, "w", encoding="utf-8") as f:
-        json.dump({lang: sorted(list(phs)) for lang, phs in lang_phonemes.items()}, f, indent=2, ensure_ascii=False)
+
+    if reverse_map:
+        merge_map_path = os.path.join(save_dir, "phoneme_merge_map.json")
+        with open(merge_map_path, "w", encoding="utf-8") as f:
+            json.dump(reverse_map, f, indent=2, ensure_ascii=False)
         
     merged_phonemes = set(existing_phonemes).union(phoneme_set)
     all_tags = {f"B-{ph}" for ph in merged_phonemes}
@@ -170,6 +173,8 @@ def preprocess(data_dir, config):
     print(f"\nGenerated {len(all_tags)} BIO labels -> {phoneme_txt_path}")
     print(f"\nSaved language mapping -> {langs_txt_path}")
     print(f"\nSaved language phoneme list -> {lang_phonemes_json_path}")
+    if reverse_map:
+        print(f"\nSaved phoneme merge map -> {merge_map_path}")
 
     print("\nPhoneme usage by language:")
     for lang, phonemes in lang_phonemes.items():
