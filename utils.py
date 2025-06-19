@@ -196,3 +196,16 @@ def load_langs(lang_path):
 def load_lang_phonemes(lang_path):
     with open(lang_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+def load_phoneme_merge_map(path):
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def canonical_to_lang(phoneme, lang, merge_map):
+    if not merge_map:
+        return phoneme
+    if phoneme in merge_map:
+        return merge_map[phoneme].get(lang, phoneme)
+    return phoneme
