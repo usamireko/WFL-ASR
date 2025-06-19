@@ -69,8 +69,8 @@ by language specific phonemes:
 ```yaml
 training:
   merged_phoneme_groups:
-    - ["merged_1", "en/A", "ja/A"]
-    - ["merged_2", "en/I", "ja/I"]
+    - ["merged_1", "en/ah", "ja/a"]
+    - ["merged_2", "en/ih", "ja/i"]
 ```
 
 During preprocessing these phonemes are replaced with the merged label. For
