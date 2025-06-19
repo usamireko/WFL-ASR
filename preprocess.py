@@ -120,7 +120,11 @@ def preprocess(data_dir, config):
     dataset_json_path = os.path.join(save_dir, "dataset.json")
     with open(dataset_json_path, "w") as f:
         json.dump(dataset, f, indent=2)
-
+    
+    lang_phonemes_json_path = os.path.join(save_dir, "lang_phonemes.json")
+    with open(lang_phonemes_json_path, "w", encoding="utf-8") as f:
+        json.dump({lang: sorted(list(phs)) for lang, phs in lang_phonemes.items()}, f, indent=2, ensure_ascii=False)
+        
     merged_phonemes = set(existing_phonemes).union(phoneme_set)
     all_tags = {f"B-{ph}" for ph in merged_phonemes}
     all_tags.update({f"I-{ph}" for ph in merged_phonemes})
@@ -139,6 +143,7 @@ def preprocess(data_dir, config):
     print(f"\nProcessed {len(dataset)} samples.")
     print(f"\nGenerated {len(all_tags)} BIO labels -> {phoneme_txt_path}")
     print(f"\nSaved language mapping -> {langs_txt_path}")
+    print(f"\nSaved language phoneme list -> {lang_phonemes_json_path}")
 
     print("\nPhoneme usage by language:")
     for lang, phonemes in lang_phonemes.items():
