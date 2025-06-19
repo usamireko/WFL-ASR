@@ -68,9 +68,12 @@ by language specific phonemes:
 
 ```yaml
 training:
+   # define phonemes group that has the same sound (like-phoneme) throughout the dataset across labeling systems
   merged_phoneme_groups:
     - ["merged_1", "en/ah", "ja/a"]
     - ["merged_2", "en/ih", "ja/i"]
+    - ["merged_3", "en/AP", "ja/AP"]
+    - ["merged_4", "en/SP", "ja/SP"]
 ```
 
 During preprocessing these phonemes are replaced with the merged label. For
