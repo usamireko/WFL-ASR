@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import soundfile as sf
 import matplotlib.pyplot as plt
+import json
 
 htk_time_factor = 1e7  # htk label uses 100ns units
 
@@ -191,3 +192,7 @@ def load_langs(lang_path):
             lang, idx = line.strip().split(",")
             lang2id[lang] = int(idx)
     return lang2id
+
+def load_lang_phonemes(lang_path):
+    with open(lang_path, "r", encoding="utf-8") as f:
+        return json.load(f)
