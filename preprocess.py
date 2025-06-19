@@ -45,9 +45,26 @@ def to_bio_tags(phonemes, num_frames, frame_duration):
                 tags[i] = f"I-{ph}"
     return tags
 
+def build_merge_map(groups):
+    merge_map = {}
+    for group in groups or []:
+        if not isinstance(group, (list, tuple)) or len(group) < 2:
+            continue
+        canonical = group[0]
+        if "/" not in canonical:
+            continue
+        _, canonical_ph = canonical.split("/", 1)
+        for item in group:
+            if "/" not in item:
+                continue
+            lang, ph = item.split("/", 1)
+            merge_map.setdefault(lang, {})[ph] = canonical_ph
+    return merge_map
+    
 def preprocess(data_dir, config):
     frame_duration = config["data"].get("frame_duration", 0.02)
     all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
+    merge_map = build_merge_map(config.get("merged_phoneme_groups", []))
     save_dir = config["output"]["save_dir"]
     existing_lang2id = {}
     existing_phonemes = set()
@@ -99,10 +116,13 @@ def preprocess(data_dir, config):
             duration = len(audio) / sr
             num_frames = int(duration / frame_duration)
 
-            phoneme_segments = parse_lab(lab_path)
-            for _, _, ph in phoneme_segments:
-                phoneme_set.add(ph)
-                lang_phonemes[lang].add(ph)
+            phoneme_segments_raw = parse_lab(lab_path)
+            phoneme_segments = []
+            for start, end, ph in phoneme_segments_raw:
+                merged_ph = merge_map.get(lang, {}).get(ph, ph)
+                phoneme_segments.append((start, end, merged_ph))
+                phoneme_set.add(merged_ph)
+                lang_phonemes[lang].add(merged_ph)
 
             bio_tags = to_bio_tags(phoneme_segments, num_frames, frame_duration)
 
@@ -139,6 +159,12 @@ def preprocess(data_dir, config):
     with open(langs_txt_path, "w", encoding="utf-8") as f:
         for lang, idx in lang2id.items():
             f.write(f"{lang},{idx}\n")
+
+    if merge_map:
+        print("\nApplied merged phoneme groups:")
+        for lang, mapping in merge_map.items():
+            for src, tgt in mapping.items():
+                print(f"  {lang}/{src} -> {tgt}")
 
     print(f"\nProcessed {len(dataset)} samples.")
     print(f"\nGenerated {len(all_tags)} BIO labels -> {phoneme_txt_path}")
