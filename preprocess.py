@@ -66,7 +66,7 @@ def build_merge_map(groups):
 def preprocess(data_dir, config):
     frame_duration = config["data"].get("frame_duration", 0.02)
     all_lang_dirs = sorted([d for d in os.listdir(data_dir) if os.path.isdir(os.path.join(data_dir, d))])
-    merge_map, reverse_map = build_merge_map(config.get("merged_phoneme_groups", []))
+    merge_map, reverse_map = build_merge_map(config.get("training", {}).get("merged_phoneme_groups", []))
     save_dir = config["output"]["save_dir"]
     existing_lang2id = {}
     existing_phonemes = set()
