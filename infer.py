@@ -6,7 +6,7 @@ import soundfile as sf
 import torchaudio
 import numpy as np
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs
+from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang 
 from scipy.ndimage import median_filter
 
 frame_duration = 0.02  # ~20ms per frame
@@ -97,9 +97,18 @@ def suppress_low_confidence(logits, id2label, threshold=0.5):
 
 def process_segments(model, segments, sr, config, device, lang_id=None,
                      sample=False, top_k=0, top_p=0.0, temperature=1.0,
-                     cache_dir=None, base_name=None, confidence_threshold=0.0):
+                     cache_dir=None, base_name=None, confidence_threshold=0.0,
+                     merge_map=None):
     all_segments = []
     current_time = 0.0
+
+    lang_name = None
+    if lang_id is not None:
+        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+        for n, i in lang2id.items():
+            if i == lang_id:
+                lang_name = n
+                break
 
     for idx, segment in enumerate(segments):
         if len(segment) > 0:
@@ -163,19 +172,34 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
         pred_tags = [model.id2label[i] for i in pred_ids]
 
         segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=seg_offsets)
+        if merge_map and lang_name:
+            segments_pred = [
+                (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                for s, e, ph in segments_pred
+            ]
         shifted_segments = [(start + current_time, end + current_time, ph) for start, end, ph in segments_pred]
         all_segments.extend(shifted_segments)
         current_time += len(segment) / sr
 
     return all_segments
 
-def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt", 
+def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt",
                 output_lab_path=None, device="cuda", lang_id=None,
                 sample=False, top_k=0, top_p=0.0, temperature=1.0,
                 confidence_threshold=0.0):
     config = load_config(config_path)
+    merge_map_path = os.path.join(config["output"]["save_dir"], "phoneme_merge_map.json")
+    merge_map = load_phoneme_merge_map(merge_map_path) if os.path.exists(merge_map_path) else None
     phoneme_txt = audio_path.replace(".wav", ".txt")
     forced = None
+
+    lang_name = None
+    if lang_id is not None:
+        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+        for n, i in lang2id.items():
+            if i == lang_id:
+                lang_name = n
+                break
 
     labels = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
     model = BIOPhonemeTagger(config, labels)
@@ -214,7 +238,8 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
         segments_pred = process_segments(
             model, segments, sr, config, device, lang_id,
             sample=sample, top_k=top_k, top_p=top_p, temperature=temperature,
-            cache_dir=cache_dir, base_name=base_name, confidence_threshold=confidence_threshold)
+            cache_dir=cache_dir, base_name=base_name, confidence_threshold=confidence_threshold,
+            merge_map=merge_map)
     else:
         if os.path.exists(logits_cache):
             print(f"Loaded cached logits for {base_name}")
@@ -273,6 +298,11 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
         pred_tags = [model.id2label[i] for i in pred_ids]
 
         segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=avg_offsets)
+        if merge_map and lang_name:
+            segments_pred = [
+                (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                for s, e, ph in segments_pred
+            ]
 
     if config["postprocess"]["merge_segments"] != "none":
         segments_pred = merge_adjacent_segments(segments_pred, mode=config["postprocess"]["merge_segments"])
