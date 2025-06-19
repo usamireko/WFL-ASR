@@ -52,10 +52,13 @@ def build_merge_map(groups):
         if not isinstance(group, (list, tuple)) or len(group) < 2:
             continue
         canonical = group[0]
-        if "/" not in canonical:
-            continue
-        _, canonical_ph = canonical.split("/", 1)
-        for item in group:
+        if "/" in canonical:
+            _, canonical_ph = canonical.split("/", 1)
+            items = group
+        else:
+            canonical_ph = canonical
+            items = group[1:]
+        for item in items:
             if "/" not in item:
                 continue
             lang, ph = item.split("/", 1)
