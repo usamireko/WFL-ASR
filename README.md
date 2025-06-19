@@ -58,3 +58,21 @@ augmentation:
 ```
 
 Disable augmentation by setting `enable: false`.
+
+---
+
+### Phoneme Merging
+Phonemes can be merged across languages by defining `merged_phoneme_groups` in
+`config.yaml`. Each group starts with a merge label such as `merged_1` (can be anything) followed
+by language specific phonemes:
+
+```yaml
+training:
+  merged_phoneme_groups:
+    - ["merged_1", "en/A", "ja/A"]
+    - ["merged_2", "en/I", "ja/I"]
+```
+
+During preprocessing these phonemes are replaced with the merged label. For
+TensorBoard visualisation and inference, the labels are mapped back to the original phoneme for
+the sample's language
