@@ -133,7 +133,7 @@ def compute_segmental_loss(segments_pred, segments_gt, loss_weights=(1.0, 1.0, 2
 
     for seg in segments_gt:
         if not isinstance(seg, (list, tuple)) or len(seg) != 3:
-            print("Skipping malformed segment:", seg)
+            #print("Skipping malformed segment:", seg)
             continue
         gt_start, gt_end, gt_ph = seg
 
@@ -199,7 +199,12 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
         offset_loss = 0.0
         offset_count = 0
 
-        for gt_start, gt_end, gt_ph in segments_gt:
+        for seg in segments_gt:
+            if not isinstance(seg, (list, tuple)) or len(seg) != 3:
+                print("Skipping malformed segment:", seg)
+                continue
+            gt_start, gt_end, gt_ph = seg
+            
             start_frame = int(gt_start / frame_duration)
             end_frame = int(gt_end / frame_duration)
             start_offset_val = (gt_start / frame_duration) - start_frame
