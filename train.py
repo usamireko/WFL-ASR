@@ -131,7 +131,12 @@ def compute_segmental_loss(segments_pred, segments_gt, loss_weights=(1.0, 1.0, 2
     total_loss = 0.0
     match_count = 0
 
-    for gt_start, gt_end, gt_ph in segments_gt:
+    for seg in segments_gt:
+        if not isinstance(seg, (list, tuple)) or len(seg) != 3:
+            print("Skipping malformed segment:", seg)
+            continue
+        gt_start, gt_end, gt_ph = seg
+
         best_score = float("inf")
 
         for pred_start, pred_end, pred_ph in segments_pred:
@@ -474,4 +479,4 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_merge/config.yaml")
+    train("/content/drive/MyDrive/WFL_normal_long/config.yaml")
