@@ -43,6 +43,10 @@ class ConformerBlock(nn.Module):
         x = self.ln1(x + attn_out)
         x_ln = self.ln2(x)
         x_conv = self.conv(x_ln.transpose(1, 2)).transpose(1, 2)
+        if x.size(1) != x_conv.size(1):
+            min_len = min(x.size(1), x_conv.size(1))
+            x = x[:, :min_len]
+            x_conv = x_conv[:, :min_len]
         x = x + x_conv
         x = x + 0.5 * self.ff2(x)
         return x
