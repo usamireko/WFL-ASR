@@ -14,6 +14,7 @@ import torchaudio
 from model import BIOPhonemeTagger
 from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang
 from scipy.ndimage import median_filter
+import argparse #finally lmao
 
 class PhonemeDataset(Dataset):
     def __init__(self, dataset_path, label_list, max_seq_len=None, aug_cfg=None):
@@ -484,4 +485,8 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2
     return avg_loss
 
 if __name__ == "__main__":
-    train("/content/drive/MyDrive/WFL_normal_long/config.yaml")
+    parser = argparse.ArgumentParser(description="Train the WFL model with a config file")
+    parser.add_argument("config", type=str, help="Path to the config.yaml file")
+    args = parser.parse_args()
+
+    train(args.config)
