@@ -4,6 +4,7 @@ import torch
 import yaml
 import soundfile as sf
 import torchaudio
+import torch
 import numpy as np
 from model import BIOPhonemeTagger
 from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang 
@@ -203,6 +204,7 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
 
     labels = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
     model = BIOPhonemeTagger(config, labels)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
     model.to(device).eval()
 
