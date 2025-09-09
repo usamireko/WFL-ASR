@@ -15,6 +15,26 @@ from model import BIOPhonemeTagger
 from utils import decode_bio_tags, save_lab, load_phoneme_list, visualize_prediction, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang
 from scipy.ndimage import median_filter
 import argparse #finally lmao
+import pytorch_optimizer as optim
+import inspect
+
+
+def collate_fn(batch):
+    input_values = [item[0] for item in batch]
+    label_ids = [item[1] for item in batch]
+    wavs = [item[2] for item in batch]
+    segments_gt = [item[3] for item in batch]
+    wav_paths = [item[4] for item in batch]
+    lang_ids = [item[5] for item in batch]
+
+    label_lengths = torch.tensor([len(x) for x in label_ids])
+
+    padded_input_values = torch.nn.utils.rnn.pad_sequence(input_values, batch_first=True, padding_value=0.0)
+    padded_label_ids = torch.nn.utils.rnn.pad_sequence(label_ids, batch_first=True, padding_value=-100)
+
+    return padded_input_values, padded_label_ids, wavs, segments_gt, wav_paths, torch.tensor(lang_ids,
+                                                                                              dtype=torch.long), label_lengths
+
 
 class PhonemeDataset(Dataset):
     def __init__(self, dataset_path, label_list, max_seq_len=None, aug_cfg=None):
@@ -170,68 +190,66 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
     model.train()
 
     for batch in train_loader:
-        input_values, label_ids, wav, segments_gt, _, lang_id = batch
-        input_values = input_values[0].cuda()
-        label_ids = label_ids[0].cuda()
-        lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
+        input_values, label_ids, wavs, segments_gt_batch, _, lang_ids, label_lengths = batch
+        input_values = input_values.cuda()
+        label_ids = label_ids.cuda()
+        lang_ids = lang_ids.cuda()
 
-        logits, offsets = model(input_values, lang_id)
-        logits = logits.squeeze(0)
-        offsets = offsets.squeeze(0)  # [T, 2]
+        max_label_len = torch.max(label_lengths) if label_lengths.numel() > 0 else 0
+        logits, offsets = model(input_values, lang_ids, max_label_len=max_label_len)
 
-        min_len = min(logits.size(0), label_ids.size(0))
-        loss = criterion(logits[:min_len], label_ids[:min_len])
-        loss = loss.mean()
+        loss = criterion(logits.view(-1, logits.size(-1)), label_ids.view(-1))
 
-        pred_ids = torch.argmax(logits, dim=-1).cpu().numpy()
+        total_segmental_loss = 0.0
+        total_offset_loss = 0.0
+        batch_size = input_values.size(0)
+
         id2label = {i: l for i, l in enumerate(label_list)}
-        pred_tags = [id2label[i] for i in pred_ids]
-        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=offsets)
+        pred_ids_batch = torch.argmax(logits, dim=-1).cpu()
 
-        if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
-            segments_gt = segments_gt[0]
+        for i in range(batch_size):
+            pred_ids = pred_ids_batch[i, :label_lengths[i]].numpy()
+            pred_tags = [id2label[p] for p in pred_ids]
+            current_offsets = offsets[i, :label_lengths[i], :] if offsets is not None else None
+            segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=current_offsets)
 
-        segmental_loss = compute_segmental_loss(
-            segments_pred, segments_gt,
-            loss_weights=config["model"].get("segmental_loss_weights", (1.0, 1.0, 2.0))
-        )
-        loss += config["model"].get("segmental_loss_weight", 1.0) * segmental_loss
+            segments_gt = segments_gt_batch[i]
+            if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
+                segments_gt = segments_gt[0]
 
-        offset_loss = 0.0
-        offset_count = 0
+            segmental_loss = compute_segmental_loss(
+                segments_pred, segments_gt,
+                loss_weights=config["model"].get("segmental_loss_weights", (1.0, 1.0, 2.0))
+            )
+            total_segmental_loss += segmental_loss
 
-        for seg in segments_gt:
-            if not isinstance(seg, (list, tuple)) or len(seg) != 3:
-                print("Skipping malformed segment:", seg)
-                continue
-            gt_start, gt_end, gt_ph = seg
+            offset_loss = 0.0
+            offset_count = 0
+            for seg in segments_gt:
+                if not isinstance(seg, (list, tuple)) or len(seg) != 3:
+                    continue
+                gt_start, gt_end, _ = seg
+                start_frame = int(gt_start / frame_duration)
+                end_frame = int(gt_end / frame_duration)
+                start_offset_val = (gt_start / frame_duration) - start_frame
+                end_offset_val = (gt_end / frame_duration) - end_frame
+
+                if current_offsets is not None:
+                    if start_frame < current_offsets.size(0):
+                        pred_start = current_offsets[start_frame, 0]
+                        offset_loss += torch.abs(pred_start - start_offset_val)
+                        offset_count += 1
+                    if end_frame < current_offsets.size(0):
+                        pred_end = current_offsets[end_frame, 1]
+                        offset_loss += torch.abs(pred_end - end_offset_val)
+                        offset_count += 1
             
-            start_frame = int(gt_start / frame_duration)
-            end_frame = int(gt_end / frame_duration)
-            start_offset_val = (gt_start / frame_duration) - start_frame
-            end_offset_val = (gt_end / frame_duration) - end_frame
+            if offset_count > 0:
+                total_offset_loss += offset_loss / offset_count
 
-            start_offset = torch.tensor([start_offset_val], device=offsets.device)
-            end_offset = torch.tensor([end_offset_val], device=offsets.device)
-
-            if start_frame < offsets.size(0):
-                pred_start = offsets[start_frame, 0]
-                offset_loss += torch.abs(pred_start - start_offset)
-                offset_count += 1
-
-            if end_frame < offsets.size(0):
-                pred_end = offsets[end_frame, 1]
-                offset_loss += torch.abs(pred_end - end_offset)
-                offset_count += 1
-
-        if offset_count > 0:
-            offset_loss = offset_loss / offset_count
-        else:
-            offset_loss = torch.tensor(0.0, device=logits.device)
-        offset_loss = offset_loss.mean()
-
-        loss += config["model"].get("subframe_loss_weight", 1.0) * offset_loss
-        writer.add_scalar("train/offset_loss", offset_loss.item(), step)
+        loss += config["model"].get("segmental_loss_weight", 1.0) * (total_segmental_loss / batch_size)
+        loss += config["model"].get("subframe_loss_weight", 1.0) * (total_offset_loss / batch_size)
+        writer.add_scalar("train/offset_loss", (total_offset_loss / batch_size).item() if isinstance(total_offset_loss, torch.Tensor) else total_offset_loss / batch_size, step)
 
         optimizer.zero_grad()
         loss.backward()
@@ -302,9 +320,10 @@ def train(config="config.yaml"):
         train_dataset,
         batch_size=config["training"]["batch_size"],
         num_workers=config["training"]["num_workers"],
-        shuffle=True
+        shuffle=True,
+        collate_fn=collate_fn
     )
-    val_loader = DataLoader(val_dataset, batch_size=1)
+    val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size"], collate_fn=collate_fn, num_workers=config["training"]["num_workers"])
 
     model = BIOPhonemeTagger(config, label_list).cuda()
 
@@ -353,17 +372,42 @@ def train(config="config.yaml"):
 
         model.load_state_dict(state_dict, strict=False)
 
-    optimizer = torch.optim.AdamW(
+    optimizer_name = config["training"].get("optimizer", "AdamW")
+    optimizer_params = config["training"].get("optimizer_params", {})
+    optimizer_params['lr'] = config["training"]["learning_rate"]
+    
+    if "weight_decay" in config["training"]:
+        optimizer_params['weight_decay'] = config["training"]["weight_decay"]
+
+    try:
+        optimizer_class = getattr(optim, optimizer_name)
+        print(f"[INFO] Using optimizer '{optimizer_name}' from pytorch-optimizer.")
+    except AttributeError:
+        print(f"[WARNING] Optimizer '{optimizer_name}' not found in pytorch-optimizer. Trying torch.optim.")
+        try:
+            import torch.optim as torch_optim
+            optimizer_class = getattr(torch_optim, optimizer_name)
+            print(f"[INFO] Using optimizer '{optimizer_name}' from torch.optim.")
+        except AttributeError:
+            print(f"[ERROR] Optimizer '{optimizer_name}' not found in torch.optim either. Please check your config.")
+            return
+
+    # Filter params for the optimizer
+    sig = inspect.signature(optimizer_class.__init__)
+    available_params = list(sig.parameters.keys())
+    
+    filtered_params = {k: v for k, v in optimizer_params.items() if k in available_params}
+
+    optimizer = optimizer_class(
         model.parameters(),
-        lr=config["training"]["learning_rate"],
-        weight_decay=config["training"]["weight_decay"]
+        **filtered_params
     )
     scheduler = StepLR(
         optimizer,
         step_size=config["training"]["val_check_interval"],
         gamma=config["training"].get("lr_decay_gamma", 0.5)
     )
-    criterion = nn.CrossEntropyLoss(label_smoothing=config["training"].get("label_smoothing", 0.0))
+    criterion = nn.CrossEntropyLoss(label_smoothing=config["training"].get("label_smoothing", 0.0), ignore_index=-100)
     writer = SummaryWriter(config["training"]["log_dir"])
 
     step = 0
@@ -413,68 +457,72 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2
 
     with torch.no_grad():
         for i, batch in enumerate(val_loader):
-            input_values, label_ids, wav, segments_gt, _, lang_id = batch
-            input_values = input_values[0].cuda()
-            label_ids = label_ids[0].cuda()
-            lang_id = torch.tensor([lang_id], dtype=torch.long).cuda()
+            input_values, label_ids, wavs, segments_gt_batch, _, lang_ids, label_lengths = batch
+            input_values = input_values.cuda()
+            label_ids = label_ids.cuda()
+            lang_ids = lang_ids.cuda()
 
-            logits, offsets = model(input_values, lang_id)
-            logits = logits.squeeze(0)
-            offsets = offsets.squeeze(0)
+            max_label_len = torch.max(label_lengths) if label_lengths.numel() > 0 else 0
+            logits, offsets = model(input_values, lang_ids, max_label_len=max_label_len)
 
-            min_len = min(logits.size(0), label_ids.size(0))
-            loss = criterion(logits[:min_len], label_ids[:min_len])
+            loss = criterion(logits.view(-1, logits.size(-1)), label_ids.view(-1))
             val_losses.append(loss.item())
 
-            if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
-                segments_gt = segments_gt[0]
-
             id2label = {i: l for i, l in enumerate(label_list)}
-            pred_ids = torch.argmax(logits, dim=-1).squeeze(0).cpu().numpy()
-            if median_filter_size > 1:
-                from scipy.ndimage import median_filter
-                pred_ids = median_filter(pred_ids, size=median_filter_size)
-            pred_tags = [id2label[i] for i in pred_ids]
+            pred_ids_batch = torch.argmax(logits, dim=-1).cpu()
 
-            segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=offsets)
+            for j in range(input_values.size(0)):
+                label_len = label_lengths[j]
+                pred_ids = pred_ids_batch[j, :label_len].numpy()
+                if median_filter_size > 1:
+                    pred_ids = median_filter(pred_ids, size=median_filter_size)
+                pred_tags = [id2label[p] for p in pred_ids]
 
-            if merge_segments != "none":
-                segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
+                current_offsets = offsets[j, :label_len, :] if offsets is not None else None
+                segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=current_offsets)
 
-            acc = compute_framewise_accuracy(logits[:min_len], label_ids[:min_len])
-            per = compute_phoneme_error_rate(segments_pred, segments_gt)
-            ter = compute_timing_error(segments_pred, segments_gt)
+                if merge_segments != "none":
+                    segments_pred = merge_adjacent_segments(segments_pred, mode=merge_segments)
 
-            lang_name = id2lang.get(lang_id.item(), None)
-            vis_pred = segments_pred
-            vis_gt = segments_gt
-            if merge_map and lang_name:
-                vis_pred = [
-                    (s, e, canonical_to_lang(ph, lang_name, merge_map))
-                    for s, e, ph in segments_pred
-                ]
-                vis_gt = [
-                    (s, e, canonical_to_lang(clean_lab(ph), lang_name, merge_map))
-                    for s, e, ph in segments_gt
-                ]
+                segments_gt = segments_gt_batch[j]
+                if isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
+                    segments_gt = segments_gt[0]
 
-            total_acc += acc
-            total_per += per
-            total_ter += ter
-            count += 1
+                acc = compute_framewise_accuracy(logits[j, :label_len].unsqueeze(0), label_ids[j, :label_len].unsqueeze(0))
+                per = compute_phoneme_error_rate(segments_pred, segments_gt)
+                ter = compute_timing_error(segments_pred, segments_gt)
 
-            fig = visualize_prediction(
-                wav[0],
-                config["data"]["sample_rate"],
-                vis_pred,
-                vis_gt,
-            )
-            writer.add_figure(f"val/prediction_{i}", fig, global_step=step)
+                total_acc += acc
+                total_per += per
+                total_ter += ter
+                count += 1
 
-    avg_loss = sum(val_losses) / len(val_losses)
-    avg_acc = total_acc / count
-    avg_per = total_per / count
-    avg_ter = total_ter / count
+                if i == 0 and j == 0:  # Visualize first sample of first batch
+                    lang_name = id2lang.get(lang_ids[j].item(), None)
+                    vis_pred = segments_pred
+                    vis_gt = segments_gt
+                    if merge_map and lang_name:
+                        vis_pred = [
+                            (s, e, canonical_to_lang(ph, lang_name, merge_map))
+                            for s, e, ph in segments_pred
+                        ]
+                        vis_gt = [
+                            (s, e, canonical_to_lang(clean_lab(ph), lang_name, merge_map))
+                            for s, e, ph in segments_gt
+                        ]
+                    
+                    fig = visualize_prediction(
+                        wavs[j],
+                        config["data"]["sample_rate"],
+                        vis_pred,
+                        vis_gt,
+                    )
+                    writer.add_figure(f"val/prediction_{i}_{j}", fig, global_step=step)
+
+    avg_loss = sum(val_losses) / len(val_losses) if val_losses else 0
+    avg_acc = total_acc / count if count > 0 else 0
+    avg_per = total_per / count if count > 0 else 0
+    avg_ter = total_ter / count if count > 0 else 0
 
     writer.add_scalar("val/loss", avg_loss, step)
     writer.add_scalar("val/accuracy", avg_acc, step)

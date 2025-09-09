@@ -145,22 +145,15 @@ class BIOPhonemeTagger(nn.Module):
         self.label2id = {label: i for i, label in enumerate(label_list)}
         self.id2label = {i: label for label, i in self.label2id.items()}
 
-    def forward(self, input_values, lang_id=None):
-        real_len = input_values.size(0)
-        input_values = input_values.unsqueeze(0)
-
+    def forward(self, input_values, lang_id=None, max_label_len=None):
         if self.encoder_type in ("none", "null"):
-            input_features = self.mel_extractor(input_values).transpose(1, 2).to(input_values.device) # [B, T, Mel]
-            hidden_states = input_features
+            hidden_states = self.mel_extractor(input_values).transpose(1, 2).to(input_values.device)
 
         elif self.encoder_type == "whisper":
             features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
             input_features = features["input_features"].to(input_values.device)
             encoder_outputs = self.encoder(input_features)
             hidden_states = encoder_outputs.last_hidden_state
-            real_duration = real_len / 16000
-            num_frames = int(real_duration / 0.02)
-            hidden_states = hidden_states[:, :num_frames, :]
 
         elif self.encoder_type == "wavlm":
             features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
@@ -168,7 +161,17 @@ class BIOPhonemeTagger(nn.Module):
             hidden_states = self.encoder(input_features).last_hidden_state
 
         else:
-            raise ValueError("Invalid encoder_type")
+            raise ValueError("Unsupported encoder_type")
+
+        if max_label_len is not None:
+            current_len = hidden_states.size(1)
+            if current_len > max_label_len:
+                hidden_states = hidden_states[:, :max_label_len, :]
+            elif current_len < max_label_len:
+                pad_len = max_label_len - current_len
+                padding = torch.zeros(hidden_states.size(0), pad_len, hidden_states.size(2),
+                                      device=hidden_states.device)
+                hidden_states = torch.cat([hidden_states, padding], dim=1)
 
         if lang_id is not None:
             lang_embed = self.lang_emb(lang_id)

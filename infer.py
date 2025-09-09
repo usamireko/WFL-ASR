@@ -4,7 +4,6 @@ import torch
 import yaml
 import soundfile as sf
 import torchaudio
-import torch
 import numpy as np
 from model import BIOPhonemeTagger
 from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang 
@@ -119,9 +118,12 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
         seg_offsets = None
 
         use_cache = cache_dir is not None and base_name is not None
+        
+        seg_logit_path, seg_offset_path = None, None
         if use_cache:
-            seg_logit_path = os.path.join(cache_dir, f"{base_name}_seg{idx}_logits.pt")
-            seg_offset_path = os.path.join(cache_dir, f"{base_name}_seg{idx}_offsets.pt")
+            lang_suffix = f"_lang{lang_id}" if lang_id is not None else "_avg"
+            seg_logit_path = os.path.join(cache_dir, f"{base_name}_seg{idx}{lang_suffix}_logits.pt")
+            seg_offset_path = os.path.join(cache_dir, f"{base_name}_seg{idx}{lang_suffix}_offsets.pt")
             if os.path.exists(seg_logit_path):
                 print(f"Loaded cached logits for segment {idx}")
                 seg_logits = torch.load(seg_logit_path, map_location=device, weights_only=False)
@@ -130,31 +132,28 @@ def process_segments(model, segments, sr, config, device, lang_id=None,
 
         if seg_logits is None:
             input_values = torch.tensor(segment, dtype=torch.float32).to(device)
-
-            logits_list = []
-            offsets_list = []
             lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
 
             if lang_id is not None:
                 if lang_id > max(lang2id.values()):
                     raise ValueError(f"Language ID {lang_id} is invalid. Available: {lang2id}")
                 lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
-                output = model(input_values, lang_tensor)
-                logits, offsets = output if isinstance(output, tuple) else (output, None)
-                logits_list.append(logits)
-                if offsets is not None:
-                    offsets_list.append(offsets)
+                output = model(input_values.unsqueeze(0), lang_tensor)
+                seg_logits, seg_offsets = output if isinstance(output, tuple) else (output, None)
+                if seg_offsets is not None:
+                    seg_offsets = seg_offsets.squeeze(0)
             else:
+                logits_list = []
+                offsets_list = []
                 for lid in lang2id.values():
                     lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
-                    output = model(input_values, lang_tensor)
+                    output = model(input_values.unsqueeze(0), lang_tensor)
                     logits, offsets = output if isinstance(output, tuple) else (output, None)
                     logits_list.append(logits)
                     if offsets is not None:
                         offsets_list.append(offsets)
-
-            seg_logits = torch.mean(torch.stack(logits_list), dim=0)
-            seg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+                seg_logits = torch.mean(torch.stack(logits_list), dim=0)
+                seg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
 
             if use_cache:
                 torch.save(seg_logits, seg_logit_path)
@@ -204,8 +203,8 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
 
     labels = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
     model = BIOPhonemeTagger(config, labels)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=True))
+    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    model.load_state_dict(state_dict)
     model.to(device).eval()
 
     if os.path.exists(phoneme_txt):
@@ -225,8 +224,9 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
     audio_dir = os.path.dirname(audio_path)
     cache_dir = os.path.join(audio_dir, ".wfl_cache")
     os.makedirs(cache_dir, exist_ok=True)
-    logits_cache = os.path.join(cache_dir, f"{base_name}_logits.pt")
-    offsets_cache = os.path.join(cache_dir, f"{base_name}_offsets.pt")
+    lang_suffix = f"_lang{lang_id}" if lang_id is not None else "_avg"
+    logits_cache = os.path.join(cache_dir, f"{base_name}{lang_suffix}_logits.pt")
+    offsets_cache = os.path.join(cache_dir, f"{base_name}{lang_suffix}_offsets.pt")
 
     avg_logits = None
     avg_offsets = None
@@ -258,22 +258,22 @@ def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_mod
                 if lang_id > max(lang2id.values()):
                     raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
                 lt = torch.tensor([lang_id], dtype=torch.long).to(device)
-                out = model(inp, lt)
-                logits, offsets = out if isinstance(out, tuple) else (out, None)
-                logits_list.append(logits)
-                if offsets is not None:
-                    offsets_list.append(offsets)
+                out = model(inp.unsqueeze(0), lt)
+                avg_logits, avg_offsets = out if isinstance(out, tuple) else (out, None)
+                if avg_offsets is not None:
+                    avg_offsets = avg_offsets.squeeze(0)
             else:
+                logits_list = []
+                offsets_list = []
                 for lid in lang2id.values():
                     lt = torch.tensor([lid], dtype=torch.long).to(device)
-                    out = model(inp, lt)
+                    out = model(inp.unsqueeze(0), lt)
                     logits, offsets = out if isinstance(out, tuple) else (out, None)
                     logits_list.append(logits)
                     if offsets is not None:
                         offsets_list.append(offsets)
-
-            avg_logits = torch.mean(torch.stack(logits_list), dim=0)
-            avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+                avg_logits = torch.mean(torch.stack(logits_list), dim=0)
+                avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
 
             torch.save(avg_logits, logits_cache)
             if avg_offsets is not None:
@@ -392,8 +392,10 @@ if __name__ == "__main__":
                 sys.exit(1)
 
         requested_device = device.lower()
-        # check anyway
-        if requested_device.startswith("cuda") and not torch.cuda.is_available():
+        if requested_device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        elif requested_device.startswith("cuda") and not torch.cuda.is_available():
+            print("Warning: CUDA not available, falling back to CPU.", file=sys.stderr)
             device = "cpu"
         else:
             device = requested_device
