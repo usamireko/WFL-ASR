@@ -7,7 +7,7 @@ import numpy as np
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 from torch.utils.tensorboard import SummaryWriter
-from torch.optim.lr_scheduler import StepLR
+from lr_schedulers import get_scheduler
 from tqdm import tqdm
 import soundfile as sf
 import torchaudio
@@ -185,7 +185,7 @@ def compute_segmental_loss(segments_pred, segments_gt, loss_weights=(1.0, 1.0, 2
 
     return torch.tensor(total_loss / match_count, requires_grad=True)
 
-def run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config):
+def run_train_step(model, train_loader, optimizer, scheduler, criterion, label_list, writer, step, config):
     frame_duration = config["data"].get("frame_duration", 0.02)
     model.train()
 
@@ -255,6 +255,9 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
         loss.backward()
         optimizer.step()
 
+        if config["training"].get("scheduler_step_on_update", False):
+            scheduler.step()
+
         step += 1
         writer.add_scalar("train/loss", loss.item(), step)
         print(f"\r[Step {step}] Loss: {loss.item():.4f}", end="")
@@ -265,6 +268,7 @@ def run_train_step(model, train_loader, optimizer, criterion, label_list, writer
             break
 
     return step, False
+
     
 def run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion, id2lang, merge_map=None):
     val_loss = evaluate(model, val_loader, label_list, config, writer, step, criterion, id2lang, merge_map)
@@ -402,11 +406,9 @@ def train(config="config.yaml"):
         model.parameters(),
         **filtered_params
     )
-    scheduler = StepLR(
-        optimizer,
-        step_size=config["training"]["val_check_interval"],
-        gamma=config["training"].get("lr_decay_gamma", 0.5)
-    )
+    scheduler_name = config["training"].get("scheduler", "ConstantLR")
+    scheduler_params = config["training"].get("scheduler_params", {})
+    scheduler = get_scheduler(optimizer, scheduler_name, scheduler_params)
     criterion = nn.CrossEntropyLoss(label_smoothing=config["training"].get("label_smoothing", 0.0), ignore_index=-100)
     writer = SummaryWriter(config["training"]["log_dir"])
 
@@ -433,10 +435,18 @@ def train(config="config.yaml"):
         print("Training start")
 
     while step < config["training"]["max_steps"]:
-        step, do_validate = run_train_step(model, train_loader, optimizer, criterion, label_list, writer, step, config)
+        step, do_validate = run_train_step(model, train_loader, optimizer, scheduler, criterion, label_list, writer, step, config)
         if do_validate:
             best_loss = run_validation(model, val_loader, label_list, config, writer, step, best_loss, checkpoint_paths, criterion, id2lang, merge_map)
-            scheduler.step(step)
+            if not config["training"].get("scheduler_step_on_update", False):
+                if scheduler.__class__.__name__ == "ReduceLROnPlateau":
+                    scheduler.step(best_loss)
+                else:
+                    sig = inspect.signature(scheduler.step)
+                    if "epoch" in sig.parameters or "step" in sig.parameters:
+                        scheduler.step(step)
+                    else:
+                        scheduler.step()
             new_lr = optimizer.param_groups[0]["lr"]
             writer.add_scalar("train/learning_rate", new_lr, step)
 
