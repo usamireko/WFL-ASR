@@ -12,8 +12,15 @@ class FocalLoss(nn.Module):
         self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='none')
 
     def forward(self, logits, targets):
+        # Force float32 for stability to prevent FP16 overflow
+        logits = logits.float()
+        
         log_pt = -self.ce(logits, targets)
         pt = torch.exp(log_pt)
+        
+        # Clamp pt to prevent absolute 0 or 1 causing math errors
+        pt = torch.clamp(pt, min=1e-8, max=1.0 - 1e-8)
+        
         loss = self.alpha * (1 - pt) ** self.gamma * self.ce(logits, targets)
         return loss.mean()
 
@@ -69,7 +76,7 @@ class ConformerBlock(nn.Module):
         x = self.ln1(x + attn_out)
         x_ln = self.ln2(x)
         x_conv = self.conv(x_ln.transpose(1, 2)).transpose(1, 2)
-        if x.size(1) != x_conv.size(1): # Handle potential padding mismatch
+        if x.size(1) != x_conv.size(1): 
              x_conv = x_conv[:, :x.size(1)]
         x = x + x_conv
         x = x + 0.5 * self.ff2(x)
@@ -116,10 +123,9 @@ class BIOPhonemeTagger(nn.Module):
                 for param in self.encoder.parameters():
                     param.requires_grad = False
                 
-                # soft-unfreeze a llowing last N layers to train for adaptation
                 unfreeze_n = config["model"].get("unfreeze_last_n_layers", 0)
                 if unfreeze_n > 0:
-                    if hasattr(self.encoder, "layers"): # Whisper/WavLM
+                    if hasattr(self.encoder, "layers"): 
                         for layer in self.encoder.layers[-unfreeze_n:]:
                             for param in layer.parameters():
                                 param.requires_grad = True
@@ -128,7 +134,6 @@ class BIOPhonemeTagger(nn.Module):
                             for param in layer.parameters():
                                 param.requires_grad = True
 
-        # funny architecture and augmentation shhhh
         self.spec_aug = SpecAugment()
         
         self.conformer_layers = nn.ModuleList([
@@ -142,7 +147,6 @@ class BIOPhonemeTagger(nn.Module):
             for _ in range(config["model"].get("num_conformer_layers", 2))
         ])
 
-        # Dilated Conv for context
         if config["model"].get("enable_dilated_conv", True):
             convs = []
             depth = config["model"].get("dilated_conv_depth", 2)
@@ -156,7 +160,6 @@ class BIOPhonemeTagger(nn.Module):
         else:
             self.dilated_conv_stack = nn.Identity()
 
-        # heads
         self.classifier = nn.Linear(hidden_size, len(label_list))
         self.boundary_offset_head = nn.Sequential(
             nn.Conv1d(hidden_size, hidden_size, kernel_size=3, padding=1),
@@ -170,7 +173,6 @@ class BIOPhonemeTagger(nn.Module):
         self.id2label = {i: label for label, i in self.label2id.items()}
 
     def forward(self, input_values, lang_id=None, max_label_len=None):
-        # features
         if self.encoder_type == "whisper":
             features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
             input_features = features["input_features"].to(input_values.device)
@@ -182,11 +184,9 @@ class BIOPhonemeTagger(nn.Module):
         else:
             hidden_states = self.mel_extractor(input_values).transpose(1, 2)
 
-        # SpecAugment (for training)
         if self.training:
             hidden_states = self.spec_aug(hidden_states)
 
-        # trim/pad to match labels
         if max_label_len is not None:
             if hidden_states.size(1) > max_label_len:
                 hidden_states = hidden_states[:, :max_label_len, :]
@@ -194,20 +194,16 @@ class BIOPhonemeTagger(nn.Module):
                 pad = torch.zeros(hidden_states.size(0), max_label_len - hidden_states.size(1), hidden_states.size(2), device=hidden_states.device)
                 hidden_states = torch.cat([hidden_states, pad], dim=1)
 
-        # lang conditioning
         if lang_id is not None:
             lang_embed = self.lang_emb(lang_id).unsqueeze(1).expand(-1, hidden_states.size(1), -1)
             hidden_states = self.lang_proj(torch.cat([hidden_states, lang_embed], dim=-1))
 
-        # conformer stack
         out = hidden_states
         for layer in self.conformer_layers:
             out = layer(out)
 
-        # dilated conv
         out = self.dilated_conv_stack(out.transpose(1, 2)).transpose(1, 2)
 
-        # heads
         logits = self.classifier(out)
         offsets = self.boundary_offset_head(out.transpose(1, 2)).transpose(1, 2)
         return logits, offsets
