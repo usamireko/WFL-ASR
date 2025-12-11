@@ -4,6 +4,7 @@ import json
 import yaml
 import soundfile as sf
 from tqdm import tqdm
+import argparse
 
 def load_config(path="config.yaml"):
     with open(path, "r") as f: return yaml.safe_load(f)
@@ -75,7 +76,7 @@ def preprocess(data_dir, config):
                 "phoneme_segments": segs, "lang_id": lang2id[lang]
             })
 
-    # save pathx
+    # save paths
     dataset_path = os.path.join(save_dir, "dataset.json")
     langs_path = os.path.join(save_dir, "langs.txt")
     phonemes_path = os.path.join(save_dir, "phonemes.txt")
@@ -122,5 +123,14 @@ def preprocess(data_dir, config):
     print(f"\nSaved updated config -> {config_path}")
 
 if __name__ == "__main__":
-    config = load_config()
+    parser = argparse.ArgumentParser(description="Preprocess dataset for WFL-ASR")
+    parser.add_argument("--config", type=str, default="configs/small.yaml", help="Path to config file")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.config):
+        print(f"Error: Config file '{args.config}' not found.")
+        exit(1)
+
+    print(f"Using config: {args.config}")
+    config = load_config(args.config)
     preprocess(config["data"]["data_dir"], config)
