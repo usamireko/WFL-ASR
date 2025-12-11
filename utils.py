@@ -1,5 +1,6 @@
 import os, json
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 def decode_bio_tags(tags, frame_duration=0.02, offsets=None):
@@ -79,17 +80,35 @@ def merge_adjacent_segments(segs, mode="right"):
     return merged
 
 def visualize_prediction(wav, sr, pred, gt=None):
-    fig, ax = plt.subplots(figsize=(12, 3))
-    ax.plot(np.linspace(0, len(wav)/sr, len(wav)), wav, color="lightblue", alpha=0.6)
+    fig, ax = plt.subplots(figsize=(12, 4))
+    ax.plot(np.linspace(0, len(wav)/sr, len(wav)), wav, color="lightblue", alpha=0.85, linewidth=1)
     
+    ax.set_ylim(-1.3, 1.3)
+    ax.set_xlim(0, len(wav)/sr)
+    ax.set_yticks([])
+    
+    # pred
+    y_pred = 0.8
     for s, e, p in pred:
-        ax.axvline(s, c="red", alpha=0.5, ls="--")
-        if e-s > 0.02: ax.text((s+e)/2, 0.8, p, c="red", ha="center", fontsize=8)
-            
+        ax.axvline(s, color="red", alpha=0.6, linestyle="--", linewidth=1)
+        # Center text in segment
+        if e - s > 0.02: 
+            ax.text((s+e)/2, y_pred, p, color="red", ha="center", va="center", fontsize=12, fontweight='bold')
+
+    # gt
+    y_gt = -0.8
     if gt:
         for item in gt:
-            if len(item)==3:
-                s, e, p = item
-                ax.axvline(s, c="green", alpha=0.3)
-                if e-s > 0.02: ax.text((s+e)/2, 0.6, p, c="green", ha="center", fontsize=8)
+            s, e, p = item[:3]
+            ax.axvline(s, color="green", alpha=0.6, linewidth=1)
+            if e - s > 0.02: 
+                ax.text((s+e)/2, y_gt, p, color="green", ha="center", va="center", fontsize=12, fontweight='bold')
+
+    legend_elements = [
+        Line2D([0], [0], color="red", marker="o", linestyle="none", label="Pred"),
+        Line2D([0], [0], color="green", marker="o", linestyle="none", label="GT")
+    ]
+    ax.legend(handles=legend_elements, loc='upper right')
+
+    plt.tight_layout()
     return fig
