@@ -1,5 +1,4 @@
-import os
-import json
+import os, json
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -9,8 +8,25 @@ def decode_bio_tags(tags, frame_duration=0.02, offsets=None):
     
     def finalize(end_idx):
         nonlocal curr_ph, start_idx
-        s_time = (start_idx + (offsets[start_idx,0] if offsets is not None else 0.0)) * frame_duration
-        e_time = (end_idx + (offsets[end_idx,1] if offsets is not None else 1.0)) * frame_duration
+        s_offset = offsets[start_idx, 0] if offsets is not None else 0.0
+        s_time = (start_idx + s_offset) * frame_duration
+        
+        last_frame = end_idx - 1
+        
+        if last_frame < 0: last_frame = 0
+            
+        # get offset for the end of the last frame
+        if offsets is not None:
+            # check bounds just in case
+            if last_frame < len(offsets):
+                e_offset = offsets[last_frame, 1]
+            else:
+                e_offset = 1.0
+        else:
+            e_offset = 1.0
+
+        e_time = (last_frame + e_offset) * frame_duration
+        
         segments.append((s_time, e_time, curr_ph))
         curr_ph, start_idx = None, None
 
@@ -32,22 +48,22 @@ def decode_bio_tags(tags, frame_duration=0.02, offsets=None):
     return segments
 
 def save_lab(path, segments):
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for s, e, p in segments:
             f.write(f"{int(s*1e7)} {int(e*1e7)} {p}\n")
 
 def load_phoneme_list(path):
-    with open(path, "r") as f: return [l.strip() for l in f if l.strip()]
+    with open(path, "r", encoding="utf-8") as f: return [l.strip() for l in f if l.strip()]
 
 def load_langs(path):
     d = {}
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         for l in f: k,v = l.strip().split(","); d[k] = int(v)
     return d
 
 def load_phoneme_merge_map(path):
     if os.path.exists(path):
-        with open(path) as f: return json.load(f)
+        with open(path, "r", encoding="utf-8") as f: return json.load(f)
     return None
 
 def canonical_to_lang(ph, lang, m_map):
