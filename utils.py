@@ -1,211 +1,79 @@
 import os
-import torch
-import numpy as np
-import soundfile as sf
-import matplotlib.pyplot as plt
 import json
-
-htk_time_factor = 1e7  # htk label uses 100ns units
+import matplotlib.pyplot as plt
+import numpy as np
 
 def decode_bio_tags(tags, frame_duration=0.02, offsets=None):
-    # bio2htk (start_time, end_time, phoneme)
     segments = []
-    current_ph = None
-    start_idx = None
+    curr_ph, start_idx = None, None
+    
+    def finalize(end_idx):
+        nonlocal curr_ph, start_idx
+        s_time = (start_idx + (offsets[start_idx,0] if offsets is not None else 0.0)) * frame_duration
+        e_time = (end_idx + (offsets[end_idx,1] if offsets is not None else 1.0)) * frame_duration
+        segments.append((s_time, e_time, curr_ph))
+        curr_ph, start_idx = None, None
 
     for i, tag in enumerate(tags):
-        if tag == "O":
-            if current_ph is not None:
-                end_idx = i
-                start_time = (start_idx + 0.5) * frame_duration
-                end_time = (end_idx + 0.5) * frame_duration
-
-                if offsets is not None:
-                    start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
-                    end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
-
-                segments.append((start_time, end_time, current_ph))
-                current_ph = None
-                start_idx = None
-            continue
-
         if tag.startswith("B-"):
-            if current_ph is not None:
-                end_idx = i
-                start_time = (start_idx + 0.5) * frame_duration
-                end_time = (end_idx + 0.5) * frame_duration
-
-                if offsets is not None:
-                    start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
-                    end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
-
-                segments.append((start_time, end_time, current_ph))
-
-            current_ph = tag[2:]
+            if curr_ph: finalize(i)
+            curr_ph = tag[2:]
             start_idx = i
-
+        elif tag == "O":
+            if curr_ph: finalize(i)
         elif tag.startswith("I-"):
             ph = tag[2:]
-            if current_ph != ph:
-                if current_ph is not None:
-                    end_idx = i
-                    start_time = (start_idx + 0.5) * frame_duration
-                    end_time = (end_idx + 0.5) * frame_duration
-
-                    if offsets is not None:
-                        start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
-                        end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
-
-                    segments.append((start_time, end_time, current_ph))
-                current_ph = ph
+            if ph != curr_ph:
+                if curr_ph: finalize(i)
+                curr_ph = ph
                 start_idx = i
-
-    if current_ph is not None:
-        end_idx = len(tags) - 1
-        start_time = (start_idx + 0.5) * frame_duration
-        end_time = (end_idx + 0.5) * frame_duration
-
-        if offsets is not None and start_idx < len(offsets) and end_idx < len(offsets):
-            start_time = (start_idx + offsets[start_idx][0].item()) * frame_duration
-            end_time = (end_idx + offsets[end_idx][1].item()) * frame_duration
-
-        segments.append((start_time, end_time, current_ph))
-
+                
+    if curr_ph: finalize(len(tags))
     return segments
 
 def save_lab(path, segments):
-    with open(path, "w", encoding="utf-8") as f:
-        for start, end, ph in segments:
-            start_htk = int(start * htk_time_factor)
-            end_htk = int(end * htk_time_factor)
-            f.write(f"{start_htk} {end_htk} {ph}\n")
+    with open(path, "w") as f:
+        for s, e, p in segments:
+            f.write(f"{int(s*1e7)} {int(e*1e7)} {p}\n")
 
 def load_phoneme_list(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+    with open(path, "r") as f: return [l.strip() for l in f if l.strip()]
 
-def clean_label(ph):
-    # for tensorboard but mf doesnt work im sobbing
-    if isinstance(ph, list):
-        ph = " ".join(str(x) for x in ph)
-
-    ph = str(ph).strip()
-
-    if ph.startswith("(") and ph.endswith(")"):
-        ph = ph[1:-1].strip()
-
-    if (ph.startswith("'") and ph.endswith("'")) or (ph.startswith('"') and ph.endswith('"')):
-        ph = ph[1:-1].strip()
-
-    return ph
-
-def visualize_prediction(waveform, sample_rate, segments_pred, segments_gt=None, title="Prediction"):
-    while isinstance(segments_gt, list) and len(segments_gt) == 1 and isinstance(segments_gt[0], list):
-        segments_gt = segments_gt[0]
-
-    duration = len(waveform) / sample_rate
-    time = np.linspace(0, duration, len(waveform))
-
-    fig, ax = plt.subplots(figsize=(12, 3))
-    fig.patch.set_alpha(0)
-    ax.set_facecolor("none")
-    ax.plot(time, waveform, alpha=0.8, color="lightblue", zorder=0)
-
-    for start, end, ph in segments_pred:
-        ph = clean_label(ph)
-        text_pos = (start + end) / 2
-        if end - start > 0.02:
-            ax.text(text_pos, 0.9, ph, color="red", ha="center", va="bottom",
-                    transform=ax.get_xaxis_transform(), fontsize=12, zorder=3)
-        ax.axvline(start, color="red", linestyle="-", linewidth=0.6, alpha=0.5, zorder=2)
-
-    if segments_gt:
-        for item in segments_gt:
-            if not isinstance(item, (list, tuple)) or len(item) != 3:
-                continue
-            try:
-                start, end, ph = float(item[0]), float(item[1]), clean_label(item[2])
-                text_pos = (start + end) / 2
-                if end - start > 0.02:
-                    ax.text(text_pos, 0.7, ph, color="green", ha="center", va="bottom",
-                            transform=ax.get_xaxis_transform(), fontsize=12, zorder=3)
-                ax.axvline(start, color="green", linestyle="-", linewidth=0.6, alpha=0.5, zorder=2)
-            except Exception as e:
-                print(f"[ERROR] Failed to plot GT segment {item}: {e}")
-
-    ax.set_title(title)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylim(-1, 1)
-
-    legend_labels = [
-        plt.Line2D([], [], linestyle="none", marker='o', color="red", markersize=8, label="Pred"),
-        plt.Line2D([], [], linestyle="none", marker='o', color="green", markersize=8, label="GT"),
-    ]
-    ax.legend(handles=legend_labels, loc="upper right", frameon=True, fancybox=True, framealpha=0.6)
-
-    return fig
-
-def merge_adjacent_segments(segments, mode="right"):
-    if not segments or mode == "none":
-        return segments
-
-    merged = []
-
-    if mode == "right":
-        merged = [segments[0]]
-        for start, end, ph in segments[1:]:
-            last_start, last_end, last_ph = merged[-1]
-            if ph == last_ph:
-                merged[-1] = (last_start, end, ph)
-            else:
-                merged.append((start, end, ph))
-    elif mode == "left":
-        i = 0
-        while i < len(segments):
-            if i > 0 and segments[i][2] == segments[i - 1][2]:
-                prev_start, prev_end, ph = merged.pop()
-                merged.append((prev_start, segments[i][1], ph))
-            else:
-                merged.append(segments[i])
-            i += 1
-    elif mode == "previous":
-        i = 0
-        while i < len(segments):
-            if i > 1 and segments[i - 1][2] == segments[i][2]:
-                if len(merged) >= 2:
-                    p0 = merged[-2]  # previous previous
-                    p1 = merged.pop()  # previous
-                    merged[-1] = (p0[0], segments[i][1], p0[2])
-                else:
-                    merged.append(segments[i])
-            else:
-                merged.append(segments[i])
-            i += 1
-    else:
-        raise ValueError(f"Unsupported merge mode: {mode}")
-    return merged
-
-def load_langs(lang_path):
-    lang2id = {}
-    with open(lang_path, "r", encoding="utf-8") as f:
-        for line in f:
-            lang, idx = line.strip().split(",")
-            lang2id[lang] = int(idx)
-    return lang2id
-
-def load_lang_phonemes(lang_path):
-    with open(lang_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_langs(path):
+    d = {}
+    with open(path, "r") as f:
+        for l in f: k,v = l.strip().split(","); d[k] = int(v)
+    return d
 
 def load_phoneme_merge_map(path):
-    if not os.path.exists(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    if os.path.exists(path):
+        with open(path) as f: return json.load(f)
+    return None
 
-def canonical_to_lang(phoneme, lang, merge_map):
-    if not merge_map:
-        return phoneme
-    if phoneme in merge_map:
-        return merge_map[phoneme].get(lang, phoneme)
-    return phoneme
+def canonical_to_lang(ph, lang, m_map):
+    return m_map.get(ph, {}).get(lang, ph)
+
+def merge_adjacent_segments(segs, mode="right"):
+    if not segs or mode=="none": return segs
+    merged = [segs[0]]
+    for s, e, p in segs[1:]:
+        ls, le, lp = merged[-1]
+        if p == lp: merged[-1] = (ls, e, lp)
+        else: merged.append((s, e, p))
+    return merged
+
+def visualize_prediction(wav, sr, pred, gt=None):
+    fig, ax = plt.subplots(figsize=(12, 3))
+    ax.plot(np.linspace(0, len(wav)/sr, len(wav)), wav, color="lightblue", alpha=0.6)
+    
+    for s, e, p in pred:
+        ax.axvline(s, c="red", alpha=0.5, ls="--")
+        if e-s > 0.02: ax.text((s+e)/2, 0.8, p, c="red", ha="center", fontsize=8)
+            
+    if gt:
+        for item in gt:
+            if len(item)==3:
+                s, e, p = item
+                ax.axvline(s, c="green", alpha=0.3)
+                if e-s > 0.02: ax.text((s+e)/2, 0.6, p, c="green", ha="center", fontsize=8)
+    return fig
