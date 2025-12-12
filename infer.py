@@ -46,6 +46,76 @@ def constrained_decode(logits, id2label):
         
     return preds
 
+def apply_hard_silence(segments, audio, sr, threshold, min_duration, silence_phoneme):
+    if len(audio) == 0:
+        return segments
+
+    frame_length = int(sr * 0.01)
+    if frame_length < 1: frame_length = 1
+    
+    pad_len = (frame_length - (len(audio) % frame_length)) % frame_length
+    padded_audio = np.pad(np.abs(audio), (0, pad_len), mode='constant')
+
+    frames = padded_audio.reshape(-1, frame_length)
+    frame_max = np.max(frames, axis=1)
+
+    is_silent_frame = frame_max < threshold
+
+    silence_intervals = []
+    in_silence = False
+    start_frame = 0
+    
+    for i, silent in enumerate(is_silent_frame):
+        if silent and not in_silence:
+            in_silence = True
+            start_frame = i
+        elif not silent and in_silence:
+            in_silence = False
+            duration = (i - start_frame) * 0.01
+            if duration >= min_duration:
+                silence_intervals.append((start_frame * 0.01, i * 0.01))
+                
+    if in_silence:
+        duration = (len(is_silent_frame) - start_frame) * 0.01
+        if duration >= min_duration:
+             silence_intervals.append((start_frame * 0.01, len(is_silent_frame) * 0.01))
+
+    if not silence_intervals:
+        return segments
+
+    new_segments = []
+    
+    segments.sort(key=lambda x: x[0])
+    
+    current_seg_idx = 0
+    
+    final_timeline = []
+    
+    temp_segments = segments.copy()
+    
+    for sil_start, sil_end in silence_intervals:
+        next_temp_segments = []
+        for s_start, s_end, s_label in temp_segments:
+            # Case 1: No Overlap
+            if s_end <= sil_start or s_start >= sil_end:
+                next_temp_segments.append((s_start, s_end, s_label))
+                continue
+
+            if s_start < sil_start:
+                next_temp_segments.append((s_start, sil_start, s_label))
+
+            if s_end > sil_end:
+                next_temp_segments.append((sil_end, s_end, s_label))
+                
+        temp_segments = next_temp_segments
+
+    for s, e in silence_intervals:
+        temp_segments.append((s, e, silence_phoneme))
+        
+    temp_segments.sort(key=lambda x: x[0])
+    
+    return temp_segments
+
 def process_audio(model, audio, sr, config, device, lang_id=None, merge_map=None, lang_name=None):
     audio = audio / (np.max(np.abs(audio)) + 1e-8)
     total_duration = len(audio) / sr
@@ -98,23 +168,21 @@ def process_audio(model, audio, sr, config, device, lang_id=None, merge_map=None
 
     valid_segments.sort(key=lambda x: x[0])
 
+
     # force Start=0.0
     # force Start_next = End_prev (extends prev item to fill gaps/O-tags)
     # force Final End = total_duration
-    
     final_segments = []
     
-    # force the first segment to start at 0.0
     curr_start = 0.0
     curr_label = valid_segments[0][2]
-    
+
     # loop from the *second* segment onwards
     for i in range(1, len(valid_segments)):
         next_start = valid_segments[i][0]
         next_label = valid_segments[i][2]
-
         final_segments.append((curr_start, next_start, curr_label))
-        
+
         # move forward
         curr_start = next_start
         curr_label = next_label
@@ -129,7 +197,11 @@ def process_audio(model, audio, sr, config, device, lang_id=None, merge_map=None
 @click.option('--checkpoint', '-ckpt', default="test.ckpt", help="Path to WFL .ckpt file")
 @click.option('--config', '-c', default="checkpoints_micro/config.yaml", help="Path to config file")
 @click.option('--lang-id', '-l', type=int, default=None, help="Language ID (int) used during training. Example: `-l 0`")
-def main(input_path, checkpoint, config, lang_id):
+# long silence stuff
+@click.option('--silence-phoneme', default="SP", help="The phoneme label to use for hard-coded silence (default: SP)")
+@click.option('--silence-threshold', default=0.005, type=float, help="Amplitude threshold (0.0-1.0) to consider as silence")
+@click.option('--min-silence-duration', default=0.5, type=float, help="Minimum duration (seconds) required to trigger hard silence")
+def main(input_path, checkpoint, config, lang_id, silence_phoneme, silence_threshold, min_silence_duration):
     cfg = load_config(config)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Running on: {device}")
@@ -186,16 +258,26 @@ def main(input_path, checkpoint, config, lang_id):
             continue
 
         if sr != cfg["data"]["sample_rate"]:
-            audio = torchaudio.functional.resample(
-                torch.tensor(audio, dtype=torch.float32), sr, cfg["data"]["sample_rate"]
-            ).numpy()
+            audio_t = torch.tensor(audio, dtype=torch.float32)
+            if audio_t.dim() > 1:
+                audio_t = audio_t.mean(dim=1)
+            audio = torchaudio.functional.resample(audio_t, sr, cfg["data"]["sample_rate"]).numpy()
             sr = cfg["data"]["sample_rate"]
-            
+        
         segments = process_audio(model, audio, sr, cfg, device, lang_id, merge_map, lang_name)
         
         if cfg.get("postprocess", {}).get("merge_segments", "right") != "none":
             from utils import merge_adjacent_segments
             segments = merge_adjacent_segments(segments, cfg["postprocess"]["merge_segments"])
+
+        segments = apply_hard_silence(
+            segments, 
+            audio, 
+            sr, 
+            threshold=silence_threshold, 
+            min_duration=min_silence_duration, 
+            silence_phoneme=silence_phoneme
+        )
 
         out_path = wav_path.replace(".wav", ".lab")
         save_lab(out_path, segments)
