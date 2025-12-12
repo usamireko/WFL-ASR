@@ -1,454 +1,208 @@
-import sys
 import os
 import torch
 import yaml
+import click
 import soundfile as sf
 import torchaudio
 import numpy as np
 from model import BIOPhonemeTagger
-from utils import decode_bio_tags, save_lab, load_phoneme_list, merge_adjacent_segments, load_langs, load_phoneme_merge_map, canonical_to_lang 
-from scipy.ndimage import median_filter
+from utils import decode_bio_tags, save_lab, load_phoneme_list, load_langs, load_phoneme_merge_map, canonical_to_lang
 
-frame_duration = 0.02  # ~20ms per frame
-MAX_SEGMENT_DURATION = 30.0
-
-def load_config(config_path="config.yaml"):
-    with open(config_path, "r") as f:
+def load_config(path):
+    with open(path, "r") as f: 
         return yaml.safe_load(f)
 
-def split_audio(audio, sr, max_duration=MAX_SEGMENT_DURATION):
-    total_samples = len(audio)
-    samples_per_segment = int(max_duration * sr)
-    segments = []
+def collect_wavs(path):
+    if os.path.isfile(path) and path.lower().endswith(".wav"):
+        return [path]
+    if os.path.isdir(path):
+        return [os.path.join(path, f) for f in os.listdir(path) if f.lower().endswith(".wav")]
+    raise ValueError(f"--input must be a .wav file or a directory: {path}")
 
-    for start in range(0, total_samples, samples_per_segment):
-        end = min(start + samples_per_segment, total_samples)
-        segments.append(audio[start:end])
-
-    return segments
-
-def align_phoneme_list(segments_pred, forced_list):
-    result = []
-    pred_idx = 0
-    forced_idx = 0
-    used_preds = set()
-
-    pred_map = [None] * len(forced_list)
-    for f_i, f_ph in enumerate(forced_list):
-        for p_i in range(pred_idx, len(segments_pred)):
-            _, _, p_ph = segments_pred[p_i]
-            if p_ph == f_ph and p_i not in used_preds:
-                pred_map[f_i] = p_i
-                used_preds.add(p_i)
-                pred_idx = p_i + 1
-                break
-    pred_ptr = 0
-    for f_i, f_ph in enumerate(forced_list):
-        if pred_map[f_i] is None:
-            while pred_ptr < len(segments_pred) and pred_ptr in used_preds:
-                pred_ptr += 1
-            if pred_ptr < len(segments_pred):
-                pred_map[f_i] = pred_ptr
-                used_preds.add(pred_ptr)
-                pred_ptr += 1
-
-    for f_i, f_ph in enumerate(forced_list):
-        p_i = pred_map[f_i]
-        if p_i is not None and p_i < len(segments_pred):
-            s, e, _ = segments_pred[p_i]
-            result.append((s, e, f_ph))
-    return result
-
-def sample_from_logits(logits, k=5, temperature=1.0):
-    probs = torch.softmax(logits / temperature, dim=-1)
-    topk_probs, topk_indices = torch.topk(probs, k=k, dim=-1)
-    topk_probs = topk_probs / topk_probs.sum(dim=-1, keepdim=True)
-    sampled = torch.multinomial(topk_probs, num_samples=1).squeeze(-1)
-    return topk_indices.gather(1, sampled.unsqueeze(-1)).squeeze(-1)
-
-def top_p_sample(logits, p=0.9, temperature=1.0):
-    probs = torch.softmax(logits / temperature, dim=-1)
-    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
-    cum_probs = torch.cumsum(sorted_probs, dim=-1)
-
-    mask = cum_probs <= p
-    mask[..., 0] = True
-
-    filtered_probs = torch.zeros_like(probs)
-    for t in range(probs.size(0)):
-        valid_idx = sorted_indices[t][mask[t]]
-        filtered_probs[t][valid_idx] = probs[t][valid_idx]
-        filtered_probs[t] /= filtered_probs[t].sum()
-
-    sampled = torch.multinomial(filtered_probs, num_samples=1).squeeze(-1)
-    return sampled
-
-def suppress_low_confidence(logits, id2label, threshold=0.5):
-    import torch
+def constrained_decode(logits, id2label):
+    preds = []
+    prev_tag = "O"
+    prev_ph = None
     probs = torch.softmax(logits, dim=-1)
-    max_probs, pred_ids = torch.max(probs, dim=-1)
-    smoothed_tags = []
-    for prob, idx in zip(max_probs, pred_ids):
-        if prob < threshold:
-            smoothed_tags.append("O")
-        else:
-            smoothed_tags.append(id2label[idx.item()])
-    return smoothed_tags
-
-def process_segments(model, segments, sr, config, device, lang_id=None,
-                     sample=False, top_k=0, top_p=0.0, temperature=1.0,
-                     cache_dir=None, base_name=None, confidence_threshold=0.0,
-                     merge_map=None):
-    all_segments = []
-    current_time = 0.0
-
-    lang_name = None
-    if lang_id is not None:
-        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
-        for n, i in lang2id.items():
-            if i == lang_id:
-                lang_name = n
-                break
-
-    for idx, segment in enumerate(segments):
-        if len(segment) > 0:
-            segment = segment / (max(abs(segment)) + 1e-8)
-
-        seg_logits = None
-        seg_offsets = None
-
-        use_cache = cache_dir is not None and base_name is not None
+    
+    for t in range(logits.shape[0]):
+        step_probs = probs[t].clone()
+        for i in range(logits.shape[-1]):
+            label = id2label[i]
+            if label.startswith("I-"):
+                ph = label[2:]
+                if not (prev_ph == ph and prev_tag in [f"B-{ph}", f"I-{ph}"]):
+                    step_probs[i] = 0.0
         
-        seg_logit_path, seg_offset_path = None, None
-        if use_cache:
-            lang_suffix = f"_lang{lang_id}" if lang_id is not None else "_avg"
-            seg_logit_path = os.path.join(cache_dir, f"{base_name}_seg{idx}{lang_suffix}_logits.pt")
-            seg_offset_path = os.path.join(cache_dir, f"{base_name}_seg{idx}{lang_suffix}_offsets.pt")
-            if os.path.exists(seg_logit_path):
-                print(f"Loaded cached logits for segment {idx}")
-                seg_logits = torch.load(seg_logit_path, map_location=device, weights_only=False)
-                if os.path.exists(seg_offset_path):
-                    seg_offsets = torch.load(seg_offset_path, map_location=device, weights_only=False)
+        if torch.sum(step_probs) == 0:
+            step_probs = probs[t].clone() 
 
-        if seg_logits is None:
-            input_values = torch.tensor(segment, dtype=torch.float32).to(device)
-            lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
+        best_id = torch.argmax(step_probs).item()
+        best_tag = id2label[best_id]
+        
+        preds.append(best_tag)
+        prev_tag = best_tag
+        prev_ph = best_tag[2:] if best_tag != "O" else None
+        
+    return preds
 
-            if lang_id is not None:
-                if lang_id > max(lang2id.values()):
-                    raise ValueError(f"Language ID {lang_id} is invalid. Available: {lang2id}")
-                lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
-                output = model(input_values.unsqueeze(0), lang_tensor)
-                seg_logits, seg_offsets = output if isinstance(output, tuple) else (output, None)
-                if seg_offsets is not None:
-                    seg_offsets = seg_offsets.squeeze(0)
-            else:
-                logits_list = []
-                offsets_list = []
-                for lid in lang2id.values():
-                    lang_tensor = torch.tensor([lid], dtype=torch.long).to(device)
-                    output = model(input_values.unsqueeze(0), lang_tensor)
-                    logits, offsets = output if isinstance(output, tuple) else (output, None)
-                    logits_list.append(logits)
-                    if offsets is not None:
-                        offsets_list.append(offsets)
-                seg_logits = torch.mean(torch.stack(logits_list), dim=0)
-                seg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
+def process_audio(model, audio, sr, config, device, lang_id=None, merge_map=None, lang_name=None):
+    audio = audio / (np.max(np.abs(audio)) + 1e-8)
+    total_duration = len(audio) / sr
+    
+    MAX_SEC = 28.0 
+    CHUNK_SIZE = int(MAX_SEC * sr)
+    total_len = len(audio)
+    
+    current_offset_sec = 0.0
+    all_segments = []
+    
+    if lang_id is not None:
+        lang_tensor = torch.tensor([lang_id], dtype=torch.long).to(device)
+    else:
+        lang_tensor = torch.zeros(1, dtype=torch.long).to(device)
 
-            if use_cache:
-                torch.save(seg_logits, seg_logit_path)
-                if seg_offsets is not None:
-                    torch.save(seg_offsets, seg_offset_path)
+    for start in range(0, total_len, CHUNK_SIZE):
+        end = min(start + CHUNK_SIZE, total_len)
+        chunk = audio[start:end]
+        
+        if len(chunk) < 1600: 
+            continue
 
-        logits_cpu = seg_logits.squeeze(0).cpu()
-        pred_tags = suppress_low_confidence(
-            logits_cpu, model.id2label,
-            threshold=confidence_threshold
-        )
+        input_values = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).to(device)
+        
+        with torch.no_grad():
+            logits, offsets = model(input_values, lang_tensor)
+            logits = logits.squeeze(0).cpu()
+            offsets = offsets.squeeze(0).cpu() if offsets is not None else None
 
-        pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
-        if config["postprocess"]["median_filter"] > 1:
-            pred_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
-        pred_tags = [model.id2label[i] for i in pred_ids]
+        pred_tags = constrained_decode(logits, model.id2label)
+        
+        segments = decode_bio_tags(pred_tags, config["data"]["frame_duration"], offsets)
+        
+        for s, e, ph in segments:
+            if merge_map and lang_name:
+                ph = canonical_to_lang(ph, lang_name, merge_map)
+            
+            abs_start = s + current_offset_sec
+            abs_end = e + current_offset_sec
+            all_segments.append([abs_start, abs_end, ph])
+            
+        current_offset_sec += len(chunk) / sr
 
-        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=seg_offsets)
-        if merge_map and lang_name:
-            segments_pred = [
-                (s, e, canonical_to_lang(ph, lang_name, merge_map))
-                for s, e, ph in segments_pred
-            ]
-        shifted_segments = [(start + current_time, end + current_time, ph) for start, end, ph in segments_pred]
-        all_segments.extend(shifted_segments)
-        current_time += len(segment) / sr
+    # filter out segments that start after the audio actually ends
+    valid_segments = [s for s in all_segments if s[0] < total_duration]
+    
+    if not valid_segments:
+        return [(0.0, total_duration, "sil")]
 
-    return all_segments
+    valid_segments.sort(key=lambda x: x[0])
 
-def infer_audio(audio_path, config_path="config.yaml", checkpoint_path="best_model.pt",
-                output_lab_path=None, device="cuda", lang_id=None,
-                sample=False, top_k=0, top_p=0.0, temperature=1.0,
-                confidence_threshold=0.0):
-    config = load_config(config_path)
-    merge_map_path = os.path.join(config["output"]["save_dir"], "phoneme_merge_map.json")
-    merge_map = load_phoneme_merge_map(merge_map_path) if os.path.exists(merge_map_path) else None
-    phoneme_txt = audio_path.replace(".wav", ".txt")
-    forced = None
+    # force Start=0.0
+    # force Start_next = End_prev (extends prev item to fill gaps/O-tags)
+    # force Final End = total_duration
+    
+    final_segments = []
+    
+    # force the first segment to start at 0.0
+    curr_start = 0.0
+    curr_label = valid_segments[0][2]
+    
+    # loop from the *second* segment onwards
+    for i in range(1, len(valid_segments)):
+        next_start = valid_segments[i][0]
+        next_label = valid_segments[i][2]
 
+        final_segments.append((curr_start, next_start, curr_label))
+        
+        # move forward
+        curr_start = next_start
+        curr_label = next_label
+
+    if curr_start < total_duration:
+        final_segments.append((curr_start, total_duration, curr_label))
+
+    return final_segments
+
+@click.command()
+@click.option('--input', '-i', 'input_path', default="long_test.wav", help="Path to a .wav file or folder containing .wav files")
+@click.option('--checkpoint', '-ckpt', default="test.ckpt", help="Path to WFL .ckpt file")
+@click.option('--config', '-c', default="checkpoints_micro/config.yaml", help="Path to config file")
+@click.option('--lang-id', '-l', type=int, default=None, help="Language ID (int) used during training. Example: `-l 0`")
+def main(input_path, checkpoint, config, lang_id):
+    cfg = load_config(config)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Running on: {device}")
+    
+    save_dir = cfg["output"]["save_dir"]
+    phonemes_path = os.path.join(save_dir, "phonemes.txt")
+    
+    if not os.path.exists(phonemes_path):
+        print(f"Error: {phonemes_path} not found.")
+        return
+
+    labels = load_phoneme_list(phonemes_path)
+    merge_map = load_phoneme_merge_map(os.path.join(save_dir, "phoneme_merge_map.json"))
+    
     lang_name = None
     if lang_id is not None:
-        lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
-        for n, i in lang2id.items():
-            if i == lang_id:
-                lang_name = n
-                break
+        lang_path = os.path.join(save_dir, "langs.txt")
+        if os.path.exists(lang_path):
+            lang2id = load_langs(lang_path)
+            id2lang = {v: k for k, v in lang2id.items()}
+            lang_name = id2lang.get(lang_id)
+            print(f"Language: {lang_name} (ID: {lang_id})")
 
-    labels = load_phoneme_list(os.path.join(config["output"]["save_dir"], "phonemes.txt"))
-    model = BIOPhonemeTagger(config, labels)
-    state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(state_dict)
-    model.to(device).eval()
+    print("Loading model...")
+    model = BIOPhonemeTagger(cfg, labels).to(device)
+    model.eval()
 
-    if os.path.exists(phoneme_txt):
-        forced = []
-        with open(phoneme_txt, "r", encoding="utf-8") as f:
-            for line in f:
-                forced.extend(line.strip().split())
-        print(f"Loaded forced phoneme list with {len(forced)} phonemes.")
-
-    audio, sr = sf.read(audio_path)
-    if sr != config["data"]["sample_rate"]:
-        audio = torchaudio.functional.resample(torch.tensor(audio), orig_freq=sr, new_freq=config["data"]["sample_rate"]).numpy()
-        sr = config["data"]["sample_rate"]
-
-    #cache for re-inference
-    base_name = os.path.splitext(os.path.basename(audio_path))[0]
-    audio_dir = os.path.dirname(audio_path)
-    cache_dir = os.path.join(audio_dir, ".wfl_cache")
-    os.makedirs(cache_dir, exist_ok=True)
-    lang_suffix = f"_lang{lang_id}" if lang_id is not None else "_avg"
-    logits_cache = os.path.join(cache_dir, f"{base_name}{lang_suffix}_logits.pt")
-    offsets_cache = os.path.join(cache_dir, f"{base_name}{lang_suffix}_offsets.pt")
-
-    avg_logits = None
-    avg_offsets = None
-
-    if len(audio) > 0:
-        audio = audio / (max(abs(audio)) + 1e-8)
-
-    if len(audio) / sr > MAX_SEGMENT_DURATION:
-        print(f"Audio is too long ({len(audio)/sr:.1f}s), splitting...")
-        segments = split_audio(audio, sr)
-        segments_pred = process_segments(
-            model, segments, sr, config, device, lang_id,
-            sample=sample, top_k=top_k, top_p=top_p, temperature=temperature,
-            cache_dir=cache_dir, base_name=base_name, confidence_threshold=confidence_threshold,
-            merge_map=merge_map)
-    else:
-        if os.path.exists(logits_cache):
-            print(f"Loaded cached logits for {base_name}")
-            avg_logits = torch.load(logits_cache, map_location=device, weights_only=False)
-            avg_offsets = torch.load(offsets_cache, map_location=device, weights_only=False) if os.path.exists(offsets_cache) else None
+    # weights_only=False because I dont like the the 'untrusted-models' warning
+    checkpoint_data = torch.load(checkpoint, map_location=device, weights_only=False)
+    state_dict = checkpoint_data['state_dict'] if 'state_dict' in checkpoint_data else checkpoint_data
+    
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("model."):
+            new_state_dict[k[6:]] = v 
         else:
-            inp = torch.tensor(audio, dtype=torch.float32).to(device)
-            lang2id = load_langs(os.path.join(config["output"]["save_dir"], "langs.txt"))
-
-            logits_list = []
-            offsets_list = []
-
-            if lang_id is not None:
-                if lang_id > max(lang2id.values()):
-                    raise ValueError(f"Error: Language ID ({lang_id}) is higher than the latest ID ({max(lang2id.values())}) of this model.\n Languages and Codes available: {lang2id}")
-                lt = torch.tensor([lang_id], dtype=torch.long).to(device)
-                out = model(inp.unsqueeze(0), lt)
-                avg_logits, avg_offsets = out if isinstance(out, tuple) else (out, None)
-                if avg_offsets is not None:
-                    avg_offsets = avg_offsets.squeeze(0)
-            else:
-                logits_list = []
-                offsets_list = []
-                for lid in lang2id.values():
-                    lt = torch.tensor([lid], dtype=torch.long).to(device)
-                    out = model(inp.unsqueeze(0), lt)
-                    logits, offsets = out if isinstance(out, tuple) else (out, None)
-                    logits_list.append(logits)
-                    if offsets is not None:
-                        offsets_list.append(offsets)
-                avg_logits = torch.mean(torch.stack(logits_list), dim=0)
-                avg_offsets = torch.mean(torch.stack(offsets_list), dim=0).squeeze(0) if offsets_list else None
-
-            torch.save(avg_logits, logits_cache)
-            if avg_offsets is not None:
-                torch.save(avg_offsets, offsets_cache)
-
-        logits_cpu = avg_logits.squeeze(0).cpu()
-        if sample:
-            if top_p > 0.0:
-                pred_ids = top_p_sample(logits_cpu, p=top_p, temperature=temperature).numpy()
-            elif top_k > 0:
-                pred_ids = sample_from_logits(logits_cpu, k=top_k, temperature=temperature).numpy()
-            else:
-                pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
-        else:
-            pred_ids = torch.argmax(logits_cpu, dim=-1).numpy()
+            new_state_dict[k] = v
             
-        pred_tags = suppress_low_confidence(
-            logits_cpu, model.id2label,
-            threshold=confidence_threshold
-        )
-        pred_ids = [model.label2id.get(tag, model.label2id["O"]) for tag in pred_tags]
-        if config["postprocess"]["median_filter"] > 1:
-            pred_ids = median_filter(pred_ids, size=config["postprocess"]["median_filter"])
-        pred_tags = [model.id2label[i] for i in pred_ids]
+    try:
+        model.load_state_dict(new_state_dict)
+    except RuntimeError as e:
+        print(f"Error loading weights: {e}")
+        return
 
-        segments_pred = decode_bio_tags(pred_tags, frame_duration=frame_duration, offsets=avg_offsets)
-        if merge_map and lang_name:
-            segments_pred = [
-                (s, e, canonical_to_lang(ph, lang_name, merge_map))
-                for s, e, ph in segments_pred
-            ]
+    files = collect_wavs(input_path)
+    print(f"Found {len(files)} files.")
 
-    if config["postprocess"]["merge_segments"] != "none":
-        segments_pred = merge_adjacent_segments(segments_pred, mode=config["postprocess"]["merge_segments"])
+    for wav_path in files:
+        print(f"Processing: {wav_path}")
+        try:
+            audio, sr = sf.read(wav_path)
+        except Exception as e:
+            print(f"Error reading {wav_path}: {e}")
+            continue
 
-    if forced is not None:
-        aligned = align_phoneme_list(segments_pred, forced)
-        if "SP" not in forced and "AP" not in forced:
-            before = [s for s in segments_pred if s[2] in ("SP", "AP") and s[1] <= aligned[0][0]]
-            after = [s for s in segments_pred if s[2] in ("SP", "AP") and s[0] >= aligned[-1][1]]
-            segments_pred = before + aligned + after
-        else:
-            segments_pred = aligned
+        if sr != cfg["data"]["sample_rate"]:
+            audio = torchaudio.functional.resample(
+                torch.tensor(audio, dtype=torch.float32), sr, cfg["data"]["sample_rate"]
+            ).numpy()
+            sr = cfg["data"]["sample_rate"]
+            
+        segments = process_audio(model, audio, sr, cfg, device, lang_id, merge_map, lang_name)
+        
+        if cfg.get("postprocess", {}).get("merge_segments", "right") != "none":
+            from utils import merge_adjacent_segments
+            segments = merge_adjacent_segments(segments, cfg["postprocess"]["merge_segments"])
 
-    if output_lab_path:
-        dir_path = os.path.dirname(output_lab_path)
-        if dir_path:
-            os.makedirs(dir_path, exist_ok=True)
-        save_lab(output_lab_path, segments_pred)
-        print(f"Predictions saved to: {output_lab_path}")
-
-    return segments_pred
-
-def infer_folder(folder_path: str, config_path: str = "config.yaml", checkpoint_path: str = "best_model.pt",
-                 output_dir: str = "outputs", device: str = "cuda", lang_id: int = None,
-                 sample=False, top_k=0, top_p=0.0, temperature=1.0, confidence_threshold=0.0):
-    wav_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".wav")]
-    os.makedirs(output_dir, exist_ok=True)
-
-    for wav_file in wav_files:
-        full_audio_path = os.path.join(folder_path, wav_file)
-        output_lab_path = os.path.join(output_dir, wav_file.replace(".wav", ".lab"))
-
-        print(f"\nInferencing: {wav_file}")
-        segments = infer_audio(
-            audio_path=str(full_audio_path),
-            config_path=str(config_path),
-            checkpoint_path=str(checkpoint_path),
-            output_lab_path=str(output_lab_path),
-            device=device,
-            lang_id=lang_id,
-            sample=sample,
-            top_k=top_k,
-            top_p=top_p,
-            temperature=temperature,
-            confidence_threshold=confidence_threshold
-        )
-        print("Predicted segments:")
-        for seg in segments:
-            start, end, ph = seg
-            print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
+        out_path = wav_path.replace(".wav", ".lab")
+        save_lab(out_path, segments)
+        print(f"Saved -> {out_path}")
 
 if __name__ == "__main__":
-    import click
-    from pathlib import Path
-    @click.command(help='Infer with WFL')
-    @click.argument('path', metavar='PATH')
-    @click.option('--checkpoint', '-ckpt', type=str, required=True, help='Path to WFL Checkpoint.')
-    @click.option('--config', '-c', type=str, required=True, help='Path to Config file.')
-    @click.option('--output', '-o', type=str, required=False, default=".", help='Path to output labels.')
-    @click.option('--lang-id', '-l', type=int, required=False, default=None, help='Language ID.')
-    @click.option('--sample', '-s', is_flag=True, help='Enable sampling instead of argmax')
-    @click.option('--top-k', '-tk', type=int, default=0, help='Top-K sampling (range: 1-20)')
-    @click.option('--top-p', '-tp', type=float, default=0.0, help='Top-P sampling (range: 0.1-1)')
-    @click.option('--temperature', '-temp', type=float, default=1.0, help='Sampling temperature (range: 0.1-2)')
-    @click.option('--device', '-d', type=str, default="auto", help='Device to use: "cuda", "cuda:0", or "cpu". Auto-detects if not specified.')
-    @click.option('--confidence-threshold', '-ct', type=float, default=None, help='Suppress predictions with low confidence. Set 0 to disable.')
-
-    def main(path, checkpoint, config, output, lang_id, sample, top_k, top_p, temperature, device, confidence_threshold):
-        # I feel like a yandere sim dev doing this
-        if sample:
-            if top_k <= 0 and top_p <= 0.0:
-                print("Sampling is enabled but neither --top-k nor --top-p is set.")
-                sys.exit(1)
-            if top_k > 0 and top_p > 0.0:
-                print("You can't use both --top-k and --top-p at the same time.")
-                sys.exit(1)
-            if top_k < 0:
-                print("top-k must be ≥ 1.")
-                sys.exit(1)
-            if top_p < 0.0 or top_p > 1.0:
-                print("top-p must be between 0.1 and 1.0.")
-                sys.exit(1)
-            if temperature <= 0.0:
-                print("temperature must be greater than 0.")
-                sys.exit(1)
-
-        requested_device = device.lower()
-        if requested_device == "auto":
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        elif requested_device.startswith("cuda") and not torch.cuda.is_available():
-            print("Warning: CUDA not available, falling back to CPU.", file=sys.stderr)
-            device = "cpu"
-        else:
-            device = requested_device
-        folder = False
-        inf_path = Path(path)
-        checkpoint_path = Path(checkpoint)
-        config_path = Path(config)
-        config = load_config(config_path)
-        if confidence_threshold is None:
-            confidence_threshold = config["postprocess"].get("confidence_threshold", 0.0)
-            
-        if output == ".":
-            output_path = inf_path
-        else:
-            output_path = output
-        if not inf_path.exists():
-            print(f"Unable to locate folder {str(inf_path)}")
-            sys.exit(1)
-        if inf_path.is_dir():
-            folder = True
-        if lang_id is not None and lang_id <= -1:
-            lang_id = None
-
-        if folder:
-            infer_folder(
-                folder_path=str(inf_path),
-                config_path=str(config_path),
-                checkpoint_path=str(checkpoint_path),
-                output_dir=str(output_path),
-                device=device,
-                lang_id=lang_id,
-                sample=sample,
-                top_k=top_k,
-                top_p=top_p,
-                temperature=temperature,
-                confidence_threshold=confidence_threshold
-            )
-        else:
-            segments = infer_audio(
-                audio_path=str(inf_path),
-                config_path=str(config_path),
-                checkpoint_path=str(checkpoint_path),
-                output_lab_path=str(output_path),
-                device=device,
-                lang_id=lang_id,
-                sample=sample,
-                top_k=top_k,
-                top_p=top_p,
-                temperature=temperature,
-                confidence_threshold=confidence_threshold
-            )
-            print("Predicted segments:")
-            for seg in segments:
-                start, end, ph = seg
-                print(f"({round(start, 2)}, {round(end, 2)}, {ph})")
-    main()
+    try:
+        main()
+    except SystemExit:
+        pass
