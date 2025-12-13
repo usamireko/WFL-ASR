@@ -209,6 +209,7 @@ class WFLModel(pl.LightningModule):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="checkpoints_micro/config.yaml", help="Path to config file")
+    parser.add_argument("--resume", type=str, default=None, help="Path to .ckpt file to resume training from")
     args = parser.parse_args()
 
     with open(args.config, "r") as f: 
@@ -254,7 +255,7 @@ def main():
     )
 
     print(f"Starting Training for {max_epochs} epochs (Validation every {check_val_every_n_epoch} epochs)...")
-    trainer.fit(model, data_module)
+    trainer.fit(model, data_module, ckpt_path=args.resume)
 
 if __name__ == "__main__":
     main()
