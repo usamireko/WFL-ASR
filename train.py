@@ -507,7 +507,9 @@ def evaluate(model, val_loader, label_list, config, writer, step, criterion, id2
                 total_ter += ter
                 count += 1
 
-                if i == 0 and j == 0:  # Visualize first sample of first batch
+                vis_limit = config["training"].get("num_vis_samples", 5)
+                if count <= vis_limit:
+
                     lang_name = id2lang.get(lang_ids[j].item(), None)
                     vis_pred = segments_pred
                     vis_gt = segments_gt
