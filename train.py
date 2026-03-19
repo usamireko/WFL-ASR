@@ -11,6 +11,8 @@ import argparse
 import numpy as np
 import soundfile as sf
 import torchaudio
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
@@ -94,6 +96,12 @@ class WFLModel(pl.LightningModule):
         
         self.model = BIOPhonemeTagger(config, label_list)
         
+        # New: Layer freezing logic
+        if config.get("finetune", {}).get("freeze_backbone", False):
+            print(">>> Fine-tuning mode: Freezing Conformer backbone.")
+            for param in self.model.conformer.parameters():
+                param.requires_grad = False
+                
         self.criterion = FocalLoss(alpha=0.5, gamma=2.0, ignore_index=-100)
         self.offset_weight = config["model"].get("subframe_loss_weight", 5.0)
         self.frame_duration = config["data"].get("frame_duration", 0.02)
@@ -225,7 +233,14 @@ def main():
     label_list = load_phoneme_list(phoneme_path)
     
     data_module = WFLDataModule(config, label_list)
-    model = WFLModel(config, label_list)
+# Logic for loading weights via config
+    ft_cfg = config.get("finetune", {})
+    if ft_cfg.get("enabled", False) and ft_cfg.get("checkpoint_path"):
+        ckpt = ft_cfg["checkpoint_path"]
+        print(f"Loading weights for fine-tuning from: {ckpt}")
+        model = WFLModel.load_from_checkpoint(ckpt, config=config, label_list=label_list)
+    else:
+        model = WFLModel(config, label_list)
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=save_dir,
