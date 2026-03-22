@@ -31,6 +31,11 @@ model:
   lang_emb_dim: 128
   num_languages: 0
 
+finetune:
+  enabled: true
+  checkpoint_path: "path/to/pretrained_model.ckpt"
+  freeze_backbone: false  # Set to true if you only want to train the output heads
+
 training:
   batch_size: 16
   num_workers: 8
