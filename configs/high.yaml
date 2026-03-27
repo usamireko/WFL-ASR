@@ -10,7 +10,6 @@ data:
 model:
   encoder_type: "whisper"
   whisper_model: "openai/whisper-base" 
-  wavlm_model: "microsoft/wavlm-base-plus"
   
   # unfreeze almost half the encoder for deep finetuning
   freeze_encoder: true 
@@ -27,6 +26,9 @@ model:
   dilated_conv_kernel: 3
 
   subframe_loss_weight: 5.0
+
+  envelope_dim: 20
+  envelope_loss_weight: 0.5
 
   lang_emb_dim: 128
   num_languages: 0

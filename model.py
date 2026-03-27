@@ -1,7 +1,8 @@
+import os
 import torch
 import torch.nn as nn
 import torchaudio
-from transformers import WhisperFeatureExtractor, WhisperModel, WavLMModel, Wav2Vec2FeatureExtractor
+from transformers import WhisperFeatureExtractor, WhisperModel
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0, ignore_index=-100):
@@ -12,15 +13,10 @@ class FocalLoss(nn.Module):
         self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index, reduction='none')
 
     def forward(self, logits, targets):
-        # Force float32 for stability to prevent FP16 overflow
         logits = logits.float()
-        
         log_pt = -self.ce(logits, targets)
         pt = torch.exp(log_pt)
-        
-        # Clamp pt to prevent absolute 0 or 1 causing math errors
         pt = torch.clamp(pt, min=1e-8, max=1.0 - 1e-8)
-        
         loss = self.alpha * (1 - pt) ** self.gamma * self.ce(logits, targets)
         return loss.mean()
 
@@ -31,7 +27,6 @@ class SpecAugment(nn.Module):
         self.time_mask = torchaudio.transforms.TimeMasking(time_mask_param)
 
     def forward(self, x):
-        # x [B, T, D] -> [B, D, T]
         x = x.transpose(1, 2)
         x = self.freq_mask(x)
         x = self.time_mask(x)
@@ -86,22 +81,24 @@ class BIOPhonemeTagger(nn.Module):
     def __init__(self, config, label_list):
         super().__init__()
         self.config = config
-        encoder_type = config["model"]["encoder_type"].lower()
-        model_name = config["model"]["whisper_model"] if encoder_type == "whisper" else config["model"]["wavlm_model"]
-        self.encoder_type = encoder_type
+        self.encoder_type = config["model"].get("encoder_type", "whisper").lower()
+        model_name = config["model"].get("whisper_model", "openai/whisper-base")
 
-        # encoders
-        if encoder_type == "whisper":
-            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(model_name)
-            self.encoder = WhisperModel.from_pretrained(model_name).encoder
+        encoder_dir = os.path.join(os.getcwd(), "encoder")
+
+        if self.encoder_type == "whisper":
+            if not os.path.exists(encoder_dir) or not os.listdir(encoder_dir):
+                print(f"Downloading Whisper ({model_name}) to local directory: {encoder_dir} ...")
+                os.makedirs(encoder_dir, exist_ok=True)
+                ext = WhisperFeatureExtractor.from_pretrained(model_name)
+                mod = WhisperModel.from_pretrained(model_name)
+                ext.save_pretrained(encoder_dir)
+                mod.save_pretrained(encoder_dir)
+                del mod 
+            
+            self.feature_extractor = WhisperFeatureExtractor.from_pretrained(encoder_dir)
+            self.encoder = WhisperModel.from_pretrained(encoder_dir).encoder
             hidden_size = self.encoder.config.d_model
-        elif encoder_type == "wavlm":
-            from transformers import WavLMConfig
-            self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
-            wavlm_config = WavLMConfig.from_pretrained(model_name)
-            wavlm_config.apply_spec_augment = False 
-            self.encoder = WavLMModel.from_pretrained(model_name, config=wavlm_config)
-            hidden_size = self.encoder.config.hidden_size
         else:
             self.encoder = None
             self.feature_extractor = None
@@ -112,12 +109,10 @@ class BIOPhonemeTagger(nn.Module):
             )
             hidden_size = self.mel_extractor.n_mels
 
-        # language embed
         self.lang_emb_dim = config["model"].get("lang_emb_dim", 64)
         self.lang_emb = nn.Embedding(config["model"]["num_languages"], self.lang_emb_dim)
         self.lang_proj = nn.Linear(hidden_size + self.lang_emb_dim, hidden_size)
 
-        # param freezing
         if self.encoder:
             if config["model"].get("freeze_encoder", False):
                 for param in self.encoder.parameters():
@@ -127,10 +122,6 @@ class BIOPhonemeTagger(nn.Module):
                 if unfreeze_n > 0:
                     if hasattr(self.encoder, "layers"): 
                         for layer in self.encoder.layers[-unfreeze_n:]:
-                            for param in layer.parameters():
-                                param.requires_grad = True
-                    elif hasattr(self.encoder, "encoder") and hasattr(self.encoder.encoder, "layers"):
-                         for layer in self.encoder.encoder.layers[-unfreeze_n:]:
                             for param in layer.parameters():
                                 param.requires_grad = True
 
@@ -168,6 +159,13 @@ class BIOPhonemeTagger(nn.Module):
             nn.Sigmoid()
         )
 
+        self.envelope_dim = config["model"].get("envelope_dim", 20)
+        self.envelope_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.GELU(),
+            nn.Linear(hidden_size // 2, self.envelope_dim)
+        )
+
         self.label_list = label_list
         self.label2id = {label: i for i, label in enumerate(label_list)}
         self.id2label = {i: label for label, i in self.label2id.items()}
@@ -176,10 +174,6 @@ class BIOPhonemeTagger(nn.Module):
         if self.encoder_type == "whisper":
             features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
             input_features = features["input_features"].to(input_values.device)
-            hidden_states = self.encoder(input_features).last_hidden_state
-        elif self.encoder_type == "wavlm":
-            features = self.feature_extractor(input_values.cpu().numpy(), sampling_rate=16000, return_tensors="pt")
-            input_features = features["input_values"].to(input_values.device)
             hidden_states = self.encoder(input_features).last_hidden_state
         else:
             hidden_states = self.mel_extractor(input_values).transpose(1, 2)
@@ -206,4 +200,7 @@ class BIOPhonemeTagger(nn.Module):
 
         logits = self.classifier(out)
         offsets = self.boundary_offset_head(out.transpose(1, 2)).transpose(1, 2)
-        return logits, offsets
+        
+        pred_envelope = self.envelope_head(out)
+        
+        return logits, offsets, pred_envelope

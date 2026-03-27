@@ -177,9 +177,8 @@ def process_audio(
         input_values = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            logits, offsets = model(input_values, lang_tensor)
+            logits, offsets, _ = model(input_values, lang_tensor)
 
-            # [1, T, D] -> [T, D]
             logits = logits.squeeze(0).cpu()
             if offsets is not None:
                 offsets = offsets.squeeze(0).cpu()
@@ -187,7 +186,6 @@ def process_audio(
             frame_dur = config["data"]["frame_duration"]
             expected_frames = int(len(audio[start:end]) / sr / frame_dur)
 
-            # sometimes model output is big boi due to conv padding, les trim it
             if logits.size(0) > expected_frames:
                 logits = logits[:expected_frames]
                 if offsets is not None:
@@ -208,7 +206,6 @@ def process_audio(
     else:
         pred_tags = constrained_decode(full_logits, model.id2label)
 
-    # offsets are already aligned because we concatenated them in order
     segments = decode_bio_tags(pred_tags, config["data"]["frame_duration"], full_offsets)
 
     all_segments = []
@@ -234,7 +231,6 @@ def process_audio(
     final_segments = []
 
     if valid_segments and valid_segments[0][0] > 0.0:
-        # add SP or extend first phoneme? usually SP at start is safer
         final_segments.append((0.0, valid_segments[0][0], "SP"))
 
     for i, (s, e, ph) in enumerate(valid_segments):
@@ -255,8 +251,8 @@ def process_audio(
 
 @click.command()
 @click.option("--input", "-i", "input_path", default="infer_test", help="Path to a .wav file or folder containing .wav files")
-@click.option("--checkpoint", "-ckpt", default="test.ckpt", help="Path to WFL .ckpt file")
-@click.option("--config", "-c", default="checkpoints_micro/config.yaml", help="Path to config file")
+@click.option("--checkpoint", "-ckpt", default="checkpoints_no_env/model.ckpt", help="Path to WFL .ckpt file")
+@click.option("--config", "-c", default="checkpoints_no_env/config.yaml", help="Path to config file")
 @click.option("--lang-id", "-l", type=int, default=None, help="Language ID (int) used during training. Example: `-l 0`")
 @click.option("--no_use_offset", is_flag=True, help="Disable offset head refinement (offsets ON by default).")
 # long silence stuff
@@ -299,8 +295,6 @@ def main(input_path, checkpoint, config, lang_id, no_use_offset, silence_phoneme
     for k, v in state_dict.items():
         if k.startswith("model."):
             new_state_dict[k[6:]] = v
-        else:
-            new_state_dict[k] = v
 
     try:
         model.load_state_dict(new_state_dict)

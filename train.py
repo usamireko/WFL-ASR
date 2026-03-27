@@ -44,7 +44,6 @@ class PhonemeDataset(Dataset):
         if sr != 16000: 
             wav = torchaudio.functional.resample(torch.tensor(wav), sr, 16000).numpy()
 
-        # augmentation
         if self.aug_cfg.get("enable", False) and random.random() < self.aug_cfg.get("prob", 0.5):
             wav *= random.uniform(*self.aug_cfg.get("volume_range", [0.9, 1.1]))
             if self.aug_cfg.get("noise_std", 0) > 0:
@@ -80,11 +79,11 @@ class WFLDataModule(pl.LightningDataModule):
 
     def train_dataloader(self):
         return DataLoader(self.train_ds, batch_size=self.batch_size, shuffle=True, 
-                          collate_fn=collate_fn, num_workers=self.num_workers, pin_memory=True)
+                          collate_fn=collate_fn, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
 
     def val_dataloader(self):
         return DataLoader(self.val_ds, batch_size=self.batch_size, shuffle=False, 
-                          collate_fn=collate_fn, num_workers=self.num_workers, pin_memory=True)
+                          collate_fn=collate_fn, num_workers=self.num_workers, pin_memory=True, persistent_workers=True)
 
 class WFLModel(pl.LightningModule):
     def __init__(self, config, label_list):
@@ -96,7 +95,6 @@ class WFLModel(pl.LightningModule):
         
         self.model = BIOPhonemeTagger(config, label_list)
         
-        # New: Layer freezing logic
         if config.get("finetune", {}).get("freeze_backbone", False):
             print(">>> Fine-tuning mode: Freezing Conformer backbone.")
             for param in self.model.conformer.parameters():
@@ -106,14 +104,29 @@ class WFLModel(pl.LightningModule):
         self.offset_weight = config["model"].get("subframe_loss_weight", 5.0)
         self.frame_duration = config["data"].get("frame_duration", 0.02)
         
-        # caps at 8 to prevent log bloating
         total_val = config["data"]["num_val_files"]
         self.num_vis_samples = min(total_val, 8) 
+        
+        # MFCC
+        self.envelope_loss_weight = config["model"].get("envelope_loss_weight", 0.5)
+        hop_length = int(config["data"]["sample_rate"] * self.frame_duration)
+        n_mfcc = config["model"].get("envelope_dim", 20)
+        
+        self.envelope_extractor = torchaudio.transforms.MFCC(
+            sample_rate=config["data"]["sample_rate"],
+            n_mfcc=n_mfcc,
+            melkwargs={
+                "n_fft": 400,
+                "hop_length": hop_length,
+                "n_mels": 80,
+                "mel_scale": "htk",
+            }
+        )
 
     def forward(self, x, lang_ids, max_len=None):
         return self.model(x, lang_ids, max_label_len=max_len)
 
-    def calculate_loss(self, logits, offsets, labels, segs_gt, lengths):
+    def calculate_loss(self, logits, offsets, pred_env, target_env, labels, segs_gt, lengths):
         cls_loss = self.criterion(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
         
         total_offset_loss = torch.tensor(0.0, device=self.device)
@@ -136,43 +149,71 @@ class WFLModel(pl.LightningModule):
             diff = torch.abs(offsets - target_map) * mask_map
             total_offset_loss = (diff.sum() / (mask_map.sum() + 1e-8)) * self.offset_weight
 
-        total_loss = cls_loss + total_offset_loss
-        return total_loss, cls_loss, total_offset_loss
+        # env l1
+        env_loss = torch.tensor(0.0, device=self.device)
+        if target_env is not None and pred_env is not None:
+            mask = (labels != -100).unsqueeze(-1).expand_as(pred_env)
+            min_len = min(pred_env.size(1), target_env.size(1))
+            
+            p_env = pred_env[:, :min_len, :] * mask[:, :min_len, :]
+            t_env = target_env[:, :min_len, :] * mask[:, :min_len, :]
+            
+            env_loss = torch.nn.functional.l1_loss(p_env, t_env, reduction='sum') / (mask.sum() + 1e-8)
+            env_loss = env_loss * self.envelope_loss_weight
+
+        total_loss = cls_loss + total_offset_loss + env_loss
+        return total_loss, cls_loss, total_offset_loss, env_loss
 
     def training_step(self, batch, batch_idx):
-        inputs, labels, _, segs_gt, _, langs, lengths = batch
+        inputs, labels, wavs, segs_gt, _, langs, lengths = batch
         max_len = torch.max(lengths) if lengths.numel() > 0 else 0
         
-        logits, offsets = self(inputs, langs, max_len)
-        loss, cls_loss, off_loss = self.calculate_loss(logits, offsets, labels, segs_gt, lengths)
+        wav_tensor = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(w, dtype=torch.float32) for w in wavs], batch_first=True
+        ).to(self.device)
         
-        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
-        self.log("train/cls_loss", cls_loss, on_step=False, on_epoch=True)
-        self.log("train/off_loss", off_loss, on_step=False, on_epoch=True)
+        with torch.no_grad():
+            target_env = self.envelope_extractor(wav_tensor).transpose(1, 2)
+
+        logits, offsets, pred_env = self(inputs, langs, max_len)
+        loss, cls_loss, off_loss, env_loss = self.calculate_loss(
+            logits, offsets, pred_env, target_env, labels, segs_gt, lengths
+        )
+        
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=inputs.size(0))
+        self.log("train/cls_loss", cls_loss, on_step=False, on_epoch=True, batch_size=inputs.size(0))
+        self.log("train/off_loss", off_loss, on_step=False, on_epoch=True, batch_size=inputs.size(0))
+        self.log("train/env_loss", env_loss, on_step=False, on_epoch=True, batch_size=inputs.size(0))
         return loss
+
+    def on_validation_epoch_start(self):
+        self.val_vis_count = 0
 
     def validation_step(self, batch, batch_idx):
         inputs, labels, wavs, segs_gt, _, langs, lengths = batch
         max_len = torch.max(lengths) if lengths.numel() > 0 else 0
         
-        logits, offsets = self(inputs, langs, max_len)
-        loss, _, _ = self.calculate_loss(logits, offsets, labels, segs_gt, lengths)
+        wav_tensor = torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(w, dtype=torch.float32) for w in wavs], batch_first=True
+        ).to(self.device)
+        
+        with torch.no_grad():
+            target_env = self.envelope_extractor(wav_tensor).transpose(1, 2)
+
+        logits, offsets, pred_env = self(inputs, langs, max_len)
+        loss, _, _, _ = self.calculate_loss(logits, offsets, pred_env, target_env, labels, segs_gt, lengths)
         
         preds = torch.argmax(logits, dim=-1)
         mask = labels != -100
-        # accuracy as Percentage
         acc = (preds == labels)[mask].float().mean() * 100.0
         
-        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True)
-        self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=inputs.size(0))
+        self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True, batch_size=inputs.size(0))
 
-        if batch_idx == 0:
-            count = min(len(wavs), self.num_vis_samples)
-            for i in range(count):
-                self._log_visualization(
-                    wavs[i], preds[i], lengths[i], offsets[i], segs_gt[i], 
-                    sample_idx=i
-                )
+        for i in range(len(wavs)):
+            if self.val_vis_count < self.num_vis_samples:
+                self._log_visualization(wavs[i], preds[i], lengths[i], offsets[i], segs_gt[i], sample_idx=self.val_vis_count)
+                self.val_vis_count += 1
 
         return loss
     
@@ -213,7 +254,6 @@ class WFLModel(pl.LightningModule):
         )
         return [optimizer], [scheduler]
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="checkpoints_micro/config.yaml", help="Path to config file")
@@ -233,7 +273,7 @@ def main():
     label_list = load_phoneme_list(phoneme_path)
     
     data_module = WFLDataModule(config, label_list)
-# Logic for loading weights via config
+    
     ft_cfg = config.get("finetune", {})
     if ft_cfg.get("enabled", False) and ft_cfg.get("checkpoint_path"):
         ckpt = ft_cfg["checkpoint_path"]
@@ -263,9 +303,8 @@ def main():
         logger=pl.loggers.TensorBoardLogger(save_dir=config["training"]["log_dir"], name="lightning_logs"),
         accelerator="auto",
         devices=1,
-        precision="32", # Disable Mixed Precision (FP16) to prevent underflow in FocalLoss
-        gradient_clip_val=1.0, # prevent explosion in Conformer
-        
+        precision="32",
+        gradient_clip_val=1.0,
         log_every_n_steps=10
     )
 
