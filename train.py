@@ -18,8 +18,10 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 from torch.utils.data import Dataset, DataLoader, random_split
 from model import BIOPhonemeTagger, FocalLoss
+from lr_schedulers import get_scheduler
 from utils import decode_bio_tags, visualize_prediction, load_phoneme_list
 import pytorch_optimizer as optim
+import inspect
 
 
 def collate_fn(batch):
@@ -235,24 +237,55 @@ class WFLModel(pl.LightningModule):
             self.logger.experiment.add_figure(f"val/prediction_{sample_idx}", fig, global_step=self.global_step)
 
     def configure_optimizers(self):
-        opt_name = self.config["training"].get("optimizer", "AdamW")
-        lr = self.config["training"]["learning_rate"]
-        decay = self.config["training"].get("weight_decay", 1e-4)
+        training_cfg = self.config["training"]
+        opt_name = training_cfg.get("optimizer", "Prodigy")
+        optimizer_params = dict(training_cfg.get("optimizer_params", {}))
+        optimizer_params["lr"] = training_cfg["learning_rate"]
         
+        if "weight_decay" in training_cfg:
+            optimizer_params["weight_decay"] = training_cfg["weight_decay"]
+
         try:
             opt_cls = getattr(optim, opt_name)
+            print(f"[INFO] Using optimizer '{opt_name}' from pytorch-optimizer.")
         except AttributeError:
-            opt_cls = getattr(torch.optim, opt_name)
+            try:
+                opt_cls = getattr(torch.optim, opt_name)
+                print(f"[INFO] Using optimizer '{opt_name}' from torch.optim.")
+            except AttributeError as exc:
+                raise ValueError(
+                    f"Optimizer '{opt_name}' not found in pytorch-optimizer or torch.optim"
+                ) from exc
+
+        sig = inspect.signature(opt_cls.__init__)
+        available_params = set(sig.parameters.keys())
+        filtered_params = {
+            key: value for key, value in optimizer_params.items() if key in available_params
+        }
             
-        optimizer = opt_cls(self.parameters(), lr=lr, weight_decay=decay)
+        optimizer = opt_cls(self.parameters(), **filtered_params)
         
-        step_size = self.config["training"].get("lr_decay_every_n_epochs", 10)
-        scheduler = torch.optim.lr_scheduler.StepLR(
-            optimizer, 
-            step_size=step_size, 
-            gamma=self.config["training"]["lr_decay_gamma"]
-        )
-        return [optimizer], [scheduler]
+        scheduler_name = training_cfg.get("scheduler")
+        scheduler_params = dict(training_cfg.get("scheduler_params", {}))
+        if scheduler_name is None and opt_name == "Prodigy":
+            scheduler_name = "ConstantLR"
+        elif scheduler_name is None:
+            scheduler_name = "StepLR"
+            scheduler_params = {
+                "step_size": training_cfg.get("lr_decay_every_n_epochs", 10),
+                "gamma": training_cfg.get("lr_decay_gamma", 0.9),
+            }
+
+        scheduler = get_scheduler(optimizer, scheduler_name, scheduler_params)
+        scheduler_config = {
+            "scheduler": scheduler,
+            "interval": "step" if training_cfg.get("scheduler_step_on_update", False) else "epoch",
+        }
+
+        if scheduler.__class__.__name__ == "ReduceLROnPlateau":
+            scheduler_config["monitor"] = training_cfg.get("scheduler_monitor", "val/loss")
+
+        return {"optimizer": optimizer, "lr_scheduler": scheduler_config}
 
 def main():
     parser = argparse.ArgumentParser()

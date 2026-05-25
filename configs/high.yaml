@@ -41,14 +41,20 @@ finetune:
 training:
   batch_size: 16
   num_workers: 8
-  optimizer: "AdamW"
+  optimizer: "Prodigy"
+  optimizer_params:
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
   
-  learning_rate: 0.00005 
-  weight_decay: 0.001
+  learning_rate: 1.0
+  weight_decay: 0.00001
   
   max_epochs: 1000
   check_val_every_n_epoch: 1
   
+  scheduler: "ConstantLR"
+  scheduler_params: {}
+  scheduler_step_on_update: false
   lr_decay_every_n_epochs: 5
   lr_decay_gamma: 0.95
   
