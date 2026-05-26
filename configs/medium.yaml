@@ -39,6 +39,7 @@ finetune:
   freeze_backbone: false  # Set to true if you only want to train the output heads
 
 training:
+  precision: "bf16-mixed" # Use "32" for full precision or "16-mixed" if BF16 is not supported
   batch_size: 8
   gradient_accumulation_steps: 1 # Effective batch size = batch_size * gradient_accumulation_steps
   num_workers: 4
