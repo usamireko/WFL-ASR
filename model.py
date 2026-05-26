@@ -67,7 +67,7 @@ class ConformerBlock(nn.Module):
 
     def forward(self, x):
         x = x + 0.5 * self.ff1(x)
-        attn_out, _ = self.self_attn(x, x, x)
+        attn_out, _ = self.self_attn(x, x, x, need_weights=False)
         x = self.ln1(x + attn_out)
         x_ln = self.ln2(x)
         x_conv = self.conv(x_ln.transpose(1, 2)).transpose(1, 2)

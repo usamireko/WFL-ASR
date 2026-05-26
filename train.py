@@ -335,6 +335,7 @@ def main():
     max_epochs = config["training"].get("max_epochs", 100)
     check_val_every_n_epoch = config["training"].get("check_val_every_n_epoch", 1)
     gradient_accumulation_steps = get_gradient_accumulation_steps(config["training"])
+    precision = config["training"].get("precision", "32")
     
     trainer = pl.Trainer(
         max_epochs=max_epochs,
@@ -343,7 +344,7 @@ def main():
         logger=pl.loggers.TensorBoardLogger(save_dir=config["training"]["log_dir"], name="lightning_logs"),
         accelerator="auto",
         devices=1,
-        precision="32",
+        precision=precision,
         gradient_clip_val=1.0,
         accumulate_grad_batches=gradient_accumulation_steps,
         log_every_n_steps=10
@@ -354,6 +355,7 @@ def main():
         f"Starting Training for {max_epochs} epochs "
         f"(Validation every {check_val_every_n_epoch} epochs, "
         f"gradient accumulation: {gradient_accumulation_steps} step(s), "
+        f"precision: {precision}, "
         f"effective batch size: {effective_batch_size})..."
     )
     trainer.fit(model, data_module, ckpt_path=args.resume)
