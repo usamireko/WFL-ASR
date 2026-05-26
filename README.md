@@ -52,12 +52,26 @@ The `config.yaml` file now includes an optional `augmentation` section used duri
 ```yaml
 augmentation:
   enable: true
-  noise_std: 0.005      # standard deviation of Gaussian noise
-  prob: 0.5             # probability to augment a sample
-  volume_range: [0.9, 1.1]  # random scaling of audio volume
+  noise_std: 0.005      
+  prob: 0.5             
+  volume_range: [0.9, 1.1]  
 ```
 
 Disable augmentation by setting `enable: false`.
+
+---
+
+## Gradient Accumulation
+
+Use `training.gradient_accumulation_steps` to accumulate gradients across multiple mini-batches before each optimizer update. This lets you keep `batch_size` small enough for GPU memory while training with a larger effective batch size:
+
+```yaml
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 4  
+```
+
+The default is `1`, which preserves normal per-batch optimizer updates.
 
 ---
 

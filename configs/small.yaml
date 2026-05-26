@@ -40,6 +40,7 @@ finetune:
 
 training:
   batch_size: 4
+  gradient_accumulation_steps: 1 # Effective batch size = batch_size * gradient_accumulation_steps
   num_workers: 2
   optimizer: "Prodigy"
   optimizer_params:

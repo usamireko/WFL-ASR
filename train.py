@@ -31,6 +31,12 @@ def collate_fn(batch):
     padded_labels = torch.nn.utils.rnn.pad_sequence(label_ids, batch_first=True, padding_value=-100)
     return padded_input, padded_labels, wavs, segments_gt, wav_paths, torch.tensor(lang_ids, dtype=torch.long), label_lengths
 
+def get_gradient_accumulation_steps(training_cfg):
+    steps = training_cfg.get("gradient_accumulation_steps", 1)
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps < 1:
+        raise ValueError("training.gradient_accumulation_steps must be an integer >= 1")
+    return steps
+
 class PhonemeDataset(Dataset):
     def __init__(self, dataset_path, label_list, max_seq_len=None, aug_cfg=None):
         with open(dataset_path, "r") as f: self.samples = json.load(f)
@@ -328,6 +334,7 @@ def main():
     
     max_epochs = config["training"].get("max_epochs", 100)
     check_val_every_n_epoch = config["training"].get("check_val_every_n_epoch", 1)
+    gradient_accumulation_steps = get_gradient_accumulation_steps(config["training"])
     
     trainer = pl.Trainer(
         max_epochs=max_epochs,
@@ -338,10 +345,17 @@ def main():
         devices=1,
         precision="32",
         gradient_clip_val=1.0,
+        accumulate_grad_batches=gradient_accumulation_steps,
         log_every_n_steps=10
     )
 
-    print(f"Starting Training for {max_epochs} epochs (Validation every {check_val_every_n_epoch} epochs)...")
+    effective_batch_size = config["training"]["batch_size"] * gradient_accumulation_steps
+    print(
+        f"Starting Training for {max_epochs} epochs "
+        f"(Validation every {check_val_every_n_epoch} epochs, "
+        f"gradient accumulation: {gradient_accumulation_steps} step(s), "
+        f"effective batch size: {effective_batch_size})..."
+    )
     trainer.fit(model, data_module, ckpt_path=args.resume)
 
 if __name__ == "__main__":
