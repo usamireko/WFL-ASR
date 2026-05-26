@@ -343,7 +343,7 @@ def main():
         logger=pl.loggers.TensorBoardLogger(save_dir=config["training"]["log_dir"], name="lightning_logs"),
         accelerator="auto",
         devices=1,
-        precision="32",
+        precision="bf16-mixed",
         gradient_clip_val=1.0,
         accumulate_grad_batches=gradient_accumulation_steps,
         log_every_n_steps=10
