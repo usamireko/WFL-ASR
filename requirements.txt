@@ -7,6 +7,9 @@ soundfile==0.13.1
 tqdm==4.67.1
 transformers==4.51.3
 click
+pytorch_lightning
+tensorboard
+tensorboardX
 pytorch-optimizer
 
 # RECOMMENDED: install torch manually. Environment used: Python 3.11
