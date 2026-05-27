@@ -75,6 +75,21 @@ The default is `1`, which preserves normal per-batch optimizer updates.
 
 ---
 
+## Pretraining and Fine-tuning
+
+To fine-tune from a pretrained checkpoint, enable the `finetune` section and point it at the checkpoint:
+
+```yaml
+finetune:
+  enabled: true
+  checkpoint_path: "path/to/pretrained_model.ckpt"
+  freeze_backbone: false
+```
+
+When the new dataset has a different phoneme list, the model loads all compatible weights and remaps the classifier head by label name. Shared labels keep their pretrained classifier weights, while new labels are initialized for the new dataset. Normal `--resume` training still expects the same model and label set as the checkpoint.
+
+---
+
 ### Phoneme Merging
 Phonemes can be merged across languages by defining `merged_phoneme_groups` in
 `config.yaml`. Each group starts with a merge label such as `merged_1` (can be anything) followed
