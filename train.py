@@ -37,6 +37,90 @@ def get_gradient_accumulation_steps(training_cfg):
         raise ValueError("training.gradient_accumulation_steps must be an integer >= 1")
     return steps
 
+def get_checkpoint_label_list(checkpoint):
+    hparams = checkpoint.get("hyper_parameters", {})
+    if isinstance(hparams, dict):
+        label_list = hparams.get("label_list")
+    else:
+        label_list = getattr(hparams, "label_list", None)
+
+    if isinstance(label_list, (list, tuple)):
+        return list(label_list)
+    return None
+
+def remap_classifier_state(state_dict, model_state, old_label_list, new_label_list):
+    weight_key = "model.classifier.weight"
+    bias_key = "model.classifier.bias"
+
+    if weight_key not in state_dict or bias_key not in state_dict:
+        return 0
+
+    if old_label_list is None:
+        state_dict.pop(weight_key, None)
+        state_dict.pop(bias_key, None)
+        print("[WARN] Checkpoint does not include label_list; classifier head will be reinitialized.")
+        return 0
+
+    if state_dict[weight_key].shape[1:] != model_state[weight_key].shape[1:]:
+        state_dict.pop(weight_key, None)
+        state_dict.pop(bias_key, None)
+        print("[WARN] Classifier input shape changed; classifier head will be reinitialized.")
+        return 0
+
+    old_label_to_id = {label: idx for idx, label in enumerate(old_label_list)}
+    old_weight = state_dict[weight_key]
+    old_bias = state_dict[bias_key]
+    new_weight = model_state[weight_key].clone()
+    new_bias = model_state[bias_key].clone()
+
+    copied = 0
+    for new_idx, label in enumerate(new_label_list):
+        old_idx = old_label_to_id.get(label)
+        if old_idx is None or old_idx >= old_weight.size(0):
+            continue
+        new_weight[new_idx] = old_weight[old_idx]
+        new_bias[new_idx] = old_bias[old_idx]
+        copied += 1
+
+    state_dict[weight_key] = new_weight
+    state_dict[bias_key] = new_bias
+    return copied
+
+def load_finetune_model(checkpoint_path, config, label_list):
+    model = WFLModel(config, label_list)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    state_dict = dict(checkpoint["state_dict"])
+    model_state = model.state_dict()
+
+    old_label_list = get_checkpoint_label_list(checkpoint)
+    copied_labels = remap_classifier_state(state_dict, model_state, old_label_list, label_list)
+
+    compatible_state = {}
+    skipped = []
+    for key, value in state_dict.items():
+        if key in model_state and value.shape == model_state[key].shape:
+            compatible_state[key] = value
+        else:
+            skipped.append(key)
+
+    missing, unexpected = model.load_state_dict(compatible_state, strict=False)
+    print(
+        f"[INFO] Loaded {len(compatible_state)} checkpoint tensors for fine-tuning "
+        f"({len(skipped)} skipped due to missing keys or shape mismatch)."
+    )
+    print(f"[INFO] Remapped classifier weights for {copied_labels}/{len(label_list)} labels.")
+    if skipped:
+        print(f"[INFO] Skipped checkpoint tensors: {', '.join(skipped)}")
+    if unexpected:
+        print(f"[INFO] Unexpected checkpoint tensors: {', '.join(unexpected)}")
+
+    classifier_missing = {"model.classifier.weight", "model.classifier.bias"}
+    non_classifier_missing = [key for key in missing if key not in classifier_missing]
+    if non_classifier_missing:
+        print(f"[INFO] Newly initialized tensors: {', '.join(non_classifier_missing)}")
+
+    return model
+
 class PhonemeDataset(Dataset):
     def __init__(self, dataset_path, label_list, max_seq_len=None, aug_cfg=None):
         with open(dataset_path, "r") as f: self.samples = json.load(f)
@@ -317,7 +401,7 @@ def main():
     if ft_cfg.get("enabled", False) and ft_cfg.get("checkpoint_path"):
         ckpt = ft_cfg["checkpoint_path"]
         print(f"Loading weights for fine-tuning from: {ckpt}")
-        model = WFLModel.load_from_checkpoint(ckpt, config=config, label_list=label_list)
+        model = load_finetune_model(ckpt, config, label_list)
     else:
         model = WFLModel(config, label_list)
 
